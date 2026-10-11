@@ -7957,10 +7957,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       std::memcpy(cb + 8, sh + 16, 4 * sizeof(float));   // sh_z   = PS c4
       std::memcpy(cb + 12, sh + 4, 4 * sizeof(float));   // sh_c1  = PS c1
       std::memcpy(cb + 16, sh + 8, 4 * sizeof(float));   // sh_c2  = PS c2
-      cb[20] = sh[32];                                   // sh_color = PS c8
-      cb[21] = sh[33];
-      cb[22] = sh[34];
-      cb[23] = 0.299f * sh[32] + 0.587f * sh[33] + 0.114f * sh[34];
       cb[24] = sh[20];  // depth bias (PS c5.x)
       cb[25] = 1.0f;    // enable
       // sh_misc.zw = atlas dimensions (3*tile x tile) for the char path's
@@ -7976,6 +7972,19 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         cb[58] = scene.char_shadow_bias[2];
         cb[59] = 1.0f;
       }
+    }
+    // Shadow color (sh_color = PS c8, the floor of every world family's
+    // min(lm^2, s + sh_color) clamp) comes from the same world bank as the
+    // light rows, so it is served whenever they are valid, not only when the
+    // dynamic atlas drew. The static sun map shades on frames with no
+    // dynamic caster too (cutscene cameras, frames whose characters the
+    // game left out of its own shadow passes); a zero floor there clamped
+    // every static-shadowed lightmapped surface to pure black.
+    if (scene.shadow_valid) {
+      cb[20] = sh[32];
+      cb[21] = sh[33];
+      cb[22] = sh[34];
+      cb[23] = 0.299f * sh[32] + 0.587f * sh[33] + 0.114f * sh[34];
     }
     // PCSS soft-shadow rows (sh_pcss / sh_pcss2, cb[136..143]). Filled
     // whenever the light rows are valid; the static sun-shadow sampler
