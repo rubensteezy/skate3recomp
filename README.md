@@ -8,7 +8,7 @@ An unofficial native recompilation of the Xbox 360 version of Skate 3, supportin
 
 As of v2.0.0, the game runs on a native renderer built directly on Direct3D 12 and Vulkan instead of emulating the Xbox 360 GPU. Compared to the emulated renderer it delivers more than twice the frame rate at roughly a quarter of the GPU power draw, and on Apple Silicon the frame rate uplift is closer to 10x.
 
-The new native renderer is early and is likely to have issues, I haven't tested the game all the way through.
+The native renderer is still early and is likely to have issues; not every part of the game has been tested all the way through.
 
 The project does not include Skate 3 retail game files. To run or build the project, you must provide files from your own legally obtained Xbox 360 copy of Skate 3.
 
@@ -20,6 +20,20 @@ Native Rendering Showcase (click to go to YouTube):
   </a>
 </p>
 
+## About This Fork
+
+This is a continuation of [mchughalex/skate3recomp](https://github.com/mchughalex/skate3recomp), the original Skate 3 recompilation by mchughalex. The original repository has been inactive since July 2026, with open pull requests left unreviewed, so development continues here. All credit for the recompilation and the native renderer goes to the original author.
+
+Changes in this fork so far:
+
+- Fixed a Direct3D 12 crash after extended play: the shader-visible descriptor heap leaked binding-table slots during world streaming until it ran out, which led to device removal (fixed in the SDK fork).
+- Fixed static shadows rendering pure black on frames with no dynamic shadow caster, such as in-game cutscene cameras.
+- Merged community fixes that were never reviewed upstream: Hall of Meat injury highlights and lens effects, the shirt vanishing or lagging while its cloth sim is active, custom-map (SkateIT/ArenaBuilder) geometry and texture coordinates, and cross-platform drone/freecam input.
+- Fresh recursive clones build again: the SDK's imgui submodule pointed at commits that were never published, and now fetches from a published fork.
+- Building from source can use the title update patches already present in an installed game folder, so the separate title update package is no longer required.
+
+Bug reports and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## How Do I Play?
 
 Notes:
@@ -27,6 +41,7 @@ Notes:
 - The Windows version is the most tested, followed by Linux, and then macOS.
 - On some hardware configurations, you may have a better experience running the Windows version through a translation layer like Proton rather than the native Linux build itself.
 - The macOS ARM build is experimental and more prone to issues.
+- This fork does not publish prebuilt releases yet. The steps below use the last release from the [original repository's releases page](https://github.com/mchughalex/skate3recomp/releases), which works but does not include this fork's fixes; to get them, [build from source](#building-from-source).
 
 ### Windows
 
@@ -68,7 +83,6 @@ Known issues:
 
 - Occasional texture and asset pop-in or brief flicker while streaming quickly around the map (also present in the emulated renderer)
 - Issues with rendering skater customization options in the edit skater mode (skin, hair, clothing etc.)
-- Hall of Meat currently not rendered properly (missing bone highlights etc.)
 - Skate parks and park editing currently have some general visual parity / rendering issues
 
 ## Installing DLC
@@ -118,10 +132,17 @@ All platforms build with CMake 3.25+, Ninja, and Clang 18 or newer - ReXGlue
 requires Clang, so MSVC and Apple Clang are not supported. On Windows, install
 [LLVM for Windows](https://releases.llvm.org/) and Ninja.
 
+Alternatively on Windows, the Clang and Ninja that ship with Visual Studio work:
+install the "C++ Clang tools for Windows" component, open an
+"x64 Native Tools Command Prompt", put Visual Studio's LLVM folder first on
+`PATH` (`set "PATH=%VCINSTALLDIR%Tools\Llvm\x64\bin;%PATH%"`), and add
+`-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++` to the configure
+commands below.
+
 Clone with submodules:
 
 ```sh
-git clone --recursive <repo-url> skate3recomp
+git clone --recursive https://github.com/rubensteezy/skate3recomp.git skate3recomp
 cd skate3recomp
 ```
 
@@ -146,6 +167,19 @@ the title update to be staged before the game will boot. Without the package,
 codegen falls back to the unpatched retail image; that path is no longer
 regularly tested, and `generate-all` reporting unresolved calls on a clean
 retail dump is the usual symptom of building without the title update.
+
+If you don't have the package but already play the game through a release
+build, point `SKATE3_GAME_DATA_ROOT` at that install's `game` folder instead:
+the in-game title update installer extracts the two TU3 patch files
+(`default.xexp` and `data/webkit/EAWebkit.xexp`) there. When no package is
+given, the build checks those files against the exact TU3 payload hashes and,
+if they match, uses them for the same TU3 codegen. The configure output says
+`Skate 3 title update codegen enabled: TU3 patches installed in ...` when this
+path is taken.
+
+`generate-all` still prints some `Unresolved conditional branch` and
+`cannot seal` lines with the title update applied; these are expected, and the
+run is fine as long as it ends with `Done in ...`.
 
 Generate the recompiled source first:
 
@@ -278,8 +312,14 @@ the native renderer then draws true widescreen frames at that aspect.
 ## rexglue Fork
 
 `third_party/rexglue-sdk` is pinned as a Git submodule to the
-`skate3-sdk-clean` branch of the Skate-specific rexglue fork. Clone
-recursively or run:
+`skate3-sdk-clean` branch of the Skate-specific rexglue fork, maintained
+alongside this repository at
+[rubensteezy/rexglue-skate3](https://github.com/rubensteezy/rexglue-skate3)
+(continued from [mchughalex/rexglue-skate3](https://github.com/mchughalex/rexglue-skate3)).
+Its imgui submodule comes from
+[rubensteezy/imgui](https://github.com/rubensteezy/imgui) (branch
+`rexglue-v1.92.5`: imgui 1.92.5 plus the `ImFontConfig::RasterizerGamma` font
+patch the SDK's UI uses). Clone recursively or run:
 
 ```sh
 git submodule sync --recursive
@@ -293,7 +333,12 @@ needed by this project.
 
 ## Credits
 
+- [mchughalex/skate3recomp](https://github.com/mchughalex/skate3recomp), the
+  original Skate 3 recompilation and native renderer this fork continues.
+- Community contributors whose upstream pull requests are merged here: zeezme,
+  andrewnakas, elespink, and schillers14-lab.
 - [rexglue SDK](https://github.com/rexglue/rexglue-sdk), the recompilation SDK
   used by this project.
+- [Dear ImGui](https://github.com/ocornut/imgui), used for the settings overlay.
 - [Xenia](https://github.com/xenia-project/xenia), whose Xbox 360 research and
   tooling have helped the broader recompilation ecosystem.
