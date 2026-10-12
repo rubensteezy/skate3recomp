@@ -6364,19 +6364,34 @@ struct FreecamState {
 };
 FreecamState g_freecam;
 
+// Guest render thread only. Disengages and drops the guest-camera takeover
+// once the freecam cvar is off; returns true when it is off. Runs at the top
+// of every BuildFrameScene, not just from UpdateFreecam (which only runs late
+// in a full build): frames that exit early (native scene disabled with F5, no
+// perspective view, no items) otherwise left g_freecam_guest_active set, and
+// the SetViewMatrix rewrite and FreecamGuestPose kept pinning the game's
+// camera and distance culls to the stale drone pose after freecam was off.
+bool ReleaseFreecamIfOff() {
+  if (REXCVAR_GET(skate3_native_render_scene_freecam)) {
+    return false;
+  }
+  FreecamState& fc = g_freecam;
+  if (fc.engaged) {
+    fc.engaged = false;
+    g_freecam_guest_active.store(0, std::memory_order_release);
+    REXLOG_INFO(
+        "native-scene freecam: off (guest camera restored; {} guest "
+        "SetViewMatrix rewrites while engaged)",
+        g_freecam_guest_rewrites.exchange(0, std::memory_order_relaxed));
+  }
+  return true;
+}
+
 // Guest render thread only. Returns true while engaged; scene.view_proj,
 // scene.proj and scene.cam_pos then hold the flown pose.
 bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
   FreecamState& fc = g_freecam;
-  if (!REXCVAR_GET(skate3_native_render_scene_freecam)) {
-    if (fc.engaged) {
-      fc.engaged = false;
-      g_freecam_guest_active.store(0, std::memory_order_release);
-      REXLOG_INFO(
-          "native-scene freecam: off (guest camera restored; {} guest "
-          "SetViewMatrix rewrites while engaged)",
-          g_freecam_guest_rewrites.exchange(0, std::memory_order_relaxed));
-    }
+  if (ReleaseFreecamIfOff()) {
     return false;
   }
   if (!fc.engaged) {
@@ -8517,6 +8532,8 @@ void WidenPublishedCamera(FrameScene& scene, float scale) {
 }
 
 void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
+  // Before any early return (see ReleaseFreecamIfOff).
+  ReleaseFreecamIfOff();
   if (!SceneEnabled()) {
     // F5 can disable native rendering between capture and publication.
     // Re-enabling must wait for a new draw rather than replay an old lens effect.
@@ -9959,10 +9976,15 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   // pose with a host-clock-interpolated one so panning is smooth at render
   // rate. All consumers (items, sky follow, sorting, outline) use the
   // smoothed pose coherently.
+  //
+  // The main ViewCamera is published unconditionally: besides the sampler
+  // thread, the freecam's SetViewMatrix takeover (sub_82802A00) matches its
+  // camera argument against it, and with smoothing off it stayed 0, so the
+  // freecam never took over the guest camera (culling stayed on the
+  // gameplay pose).
+  g_sampler_viewcam.store(viewcam, std::memory_order_relaxed);
   if (REXCVAR_GET(skate3_native_render_scene_smooth_camera)) {
-    // Publish the ViewCamera for the ~1 kHz sampler thread and make sure it
-    // runs (see CamSamplerLoop).
-    g_sampler_viewcam.store(viewcam, std::memory_order_relaxed);
+    // Make sure the ~1 kHz sampler thread runs (see CamSamplerLoop).
     EnsureCamSampler();
     float proj[16];
     for (int i = 0; i < 16; ++i) {

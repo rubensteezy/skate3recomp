@@ -43,6 +43,12 @@ constexpr std::array<uint64_t, 5> kPossibleGameOffsets = {
     0x00000000ull, 0x0000FB20ull, 0x00020600ull, 0x02080000ull, 0x0FD90000ull};
 constexpr std::string_view kXdvdfsMagic = "MICROSOFT*XBOX*MEDIA";
 constexpr std::string_view kDefaultXex = "default.xex";
+// Present in the game root for the whole of an ISO extraction and removed only
+// once every file was written, so an interrupted or failed install (where
+// default.xex may already exist) is not mistaken for a complete one. A marker
+// that flags "incomplete" rather than "complete" keeps installs made before it
+// existed, and game folders copied in by hand, counting as installed.
+constexpr std::string_view kInstallIncompleteMarker = ".skate3_install_incomplete";
 
 uint16_t ReadLe16(const uint8_t* p) {
   return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
@@ -60,18 +66,30 @@ std::string ToLower(std::string value) {
   return value;
 }
 
+// ISO names are attacker-controlled bytes that end up joined onto the install
+// directory, and on Windows std::filesystem treats '\' as a separator and ':'
+// as a drive letter ("C:x") or NTFS alternate data stream ("a:stream"), so a
+// '/'-only split is not enough. Reject absolute paths, ':' and control bytes,
+// then split on both separators and reject empty components and any made only
+// of dots/spaces (Win32 strips trailing dots and spaces, so "... " or ". ."
+// can collapse to "." / "..").
 bool IsUnsafeIsoPath(std::string_view path) {
   if (path.empty() || path.starts_with('/') || path.starts_with('\\')) {
     return true;
   }
+  for (const char c : path) {
+    if (c == ':' || static_cast<unsigned char>(c) < 0x20) {
+      return true;
+    }
+  }
   size_t start = 0;
   while (start <= path.size()) {
-    size_t end = path.find('/', start);
+    size_t end = path.find_first_of("/\\", start);
     if (end == std::string_view::npos) {
       end = path.size();
     }
     auto component = path.substr(start, end - start);
-    if (component.empty() || component == "." || component == "..") {
+    if (component.find_first_not_of(". ") == std::string_view::npos) {
       return true;
     }
     if (end == path.size()) {
@@ -233,13 +251,26 @@ class XboxIsoReader {
       return false;
     }
 
-    std::vector<uint8_t> buffer(4 * 1024 * 1024);
+    // Validate every path before writing anything, so a bad entry late in the
+    // ISO does not leave a half-extracted tree behind.
     for (const auto& entry : entries_) {
       if (IsUnsafeIsoPath(entry.path)) {
         error = "The ISO contains an unsafe file path.";
         return false;
       }
+    }
 
+    const auto marker = target_root / std::string(kInstallIncompleteMarker);
+    {
+      std::ofstream marker_out(marker, std::ios::binary | std::ios::trunc);
+      if (!marker_out) {
+        error = "Unable to write to the game directory.";
+        return false;
+      }
+    }
+
+    std::vector<uint8_t> buffer(4 * 1024 * 1024);
+    for (const auto& entry : entries_) {
       const auto target = target_root / std::filesystem::path(entry.path);
       std::filesystem::create_directories(target.parent_path(), ec);
       if (ec) {
@@ -270,8 +301,19 @@ class XboxIsoReader {
         read_offset += chunk;
         copied_bytes.fetch_add(chunk, std::memory_order_relaxed);
       }
+      // Surface deferred write errors (e.g. disk full on the final flush)
+      // before the marker is cleared.
+      out.close();
+      if (!out) {
+        error = "Failed to write " + entry.path + ".";
+        return false;
+      }
     }
 
+    if (!std::filesystem::remove(marker, ec) || ec) {
+      error = "Unable to finalize the game directory.";
+      return false;
+    }
     return true;
   }
 
@@ -359,7 +401,13 @@ class XboxIsoReader {
 }  // namespace
 
 bool IsGameInstalled(const std::filesystem::path& game_root) {
-  return std::filesystem::is_regular_file(game_root / std::string(kDefaultXex));
+  std::error_code ec;
+  if (std::filesystem::exists(game_root / std::string(kInstallIncompleteMarker), ec)) {
+    REXLOG_WARN("Game files at {} are from an incomplete ISO install; reinstall required",
+                game_root.string());
+    return false;
+  }
+  return std::filesystem::is_regular_file(game_root / std::string(kDefaultXex), ec);
 }
 
 void ShowRexglueIsoInstallWizard(rex::ui::ImGuiDrawer* drawer, rex::PathConfig runtime_paths,

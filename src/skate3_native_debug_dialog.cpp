@@ -169,10 +169,14 @@ int32_t ValueCombo(const char* label, int32_t value, const int32_t* values,
 // tuning) keep their values: this maximizes fidelity, not effect strength.
 // SSR stays as-is (experimental, image-quality issues) and quad-list
 // particles stay off (no sprite textures).
+//
+// Several of these knobs are also user settings that the SDK's settings
+// save (SaveSimpleSettingsConfig) persists from the LIVE cvars, so a save
+// while the mode is on would write the maxed values into settings.toml.
+// Every settings save path therefore runs with the mode suspended (see
+// WithMaxQualitySuspended / SuspendMaxQuality below).
 
-struct MaxQualityState {
-  bool active = false;
-  // Saved values, restored on switch-off.
+struct MaxQualityValues {
   int32_t msaa;
   int32_t shadow_tile;
   int32_t static_size;
@@ -191,6 +195,47 @@ struct MaxQualityState {
   double stream_probe;
 };
 
+MaxQualityValues ReadMaxQualityValues() {
+  MaxQualityValues v;
+  v.msaa = REXCVAR_GET(skate3_native_render_scene_msaa);
+  v.shadow_tile = REXCVAR_GET(skate3_native_render_scene_shadow_tile);
+  v.static_size = REXCVAR_GET(skate3_native_render_scene_shadow_static_size);
+  v.shafts_steps = REXCVAR_GET(skate3_native_render_scene_shafts_steps);
+  v.ssao_full_res = REXCVAR_GET(skate3_native_render_scene_ssao_full_res);
+  v.hdr_packed = REXCVAR_GET(skate3_native_render_scene_hdr_packed);
+  v.hdr = REXCVAR_GET(skate3_native_render_scene_hdr);
+  v.bloom = REXCVAR_GET(skate3_native_render_scene_bloom);
+  v.shafts = REXCVAR_GET(skate3_native_render_scene_shafts);
+  v.ssao = REXCVAR_GET(skate3_native_render_scene_ssao);
+  v.shadows = REXCVAR_GET(skate3_native_render_scene_shadows);
+  v.static_casters = REXCVAR_GET(skate3_native_render_scene_shadow_static_casters);
+  v.pcss = REXCVAR_GET(skate3_native_render_scene_shadow_pcss);
+  v.draw_scale = REXCVAR_GET(skate3_draw_distance_scale);
+  v.lod_scale = REXCVAR_GET(skate3_lod_distance_scale);
+  v.stream_probe = REXCVAR_GET(skate3_draw_distance_stream_probe);
+  return v;
+}
+
+// Switch-off restore: a value that no longer matches what the mode applied
+// was changed while it was on (an options-menu row, the settings overlay
+// under a suspend/resume) and is the user's newer choice, so it is kept
+// instead of being reverted to the pre-mode value.
+template <typename T>
+void RestoreUnlessChanged(T& live, T saved, T applied) {
+  if (live == applied) {
+    live = saved;
+  }
+}
+
+struct MaxQualityState {
+  bool active = false;
+  // Switched off by SuspendMaxQuality (settings overlay open); turned back
+  // on by ResumeMaxQuality.
+  bool suspended = false;
+  MaxQualityValues saved;    // pre-mode values, restored on switch-off
+  MaxQualityValues applied;  // what the mode set, to detect later changes
+};
+
 MaxQualityState s_max_quality;
 
 void SetMaxQuality(bool enable) {
@@ -199,23 +244,7 @@ void SetMaxQuality(bool enable) {
     return;
   }
   if (enable) {
-    s.msaa = REXCVAR_GET(skate3_native_render_scene_msaa);
-    s.shadow_tile = REXCVAR_GET(skate3_native_render_scene_shadow_tile);
-    s.static_size = REXCVAR_GET(skate3_native_render_scene_shadow_static_size);
-    s.shafts_steps = REXCVAR_GET(skate3_native_render_scene_shafts_steps);
-    s.ssao_full_res = REXCVAR_GET(skate3_native_render_scene_ssao_full_res);
-    s.hdr_packed = REXCVAR_GET(skate3_native_render_scene_hdr_packed);
-    s.hdr = REXCVAR_GET(skate3_native_render_scene_hdr);
-    s.bloom = REXCVAR_GET(skate3_native_render_scene_bloom);
-    s.shafts = REXCVAR_GET(skate3_native_render_scene_shafts);
-    s.ssao = REXCVAR_GET(skate3_native_render_scene_ssao);
-    s.shadows = REXCVAR_GET(skate3_native_render_scene_shadows);
-    s.static_casters =
-        REXCVAR_GET(skate3_native_render_scene_shadow_static_casters);
-    s.pcss = REXCVAR_GET(skate3_native_render_scene_shadow_pcss);
-    s.draw_scale = REXCVAR_GET(skate3_draw_distance_scale);
-    s.lod_scale = REXCVAR_GET(skate3_lod_distance_scale);
-    s.stream_probe = REXCVAR_GET(skate3_draw_distance_stream_probe);
+    s.saved = ReadMaxQualityValues();
 
     REXCVAR_SET(skate3_native_render_scene_msaa, 8);
     REXCVAR_SET(skate3_native_render_scene_shadow_tile, 4096);
@@ -234,24 +263,36 @@ void SetMaxQuality(bool enable) {
     REXCVAR_SET(skate3_draw_distance_scale, 5.0);
     REXCVAR_SET(skate3_lod_distance_scale, 5.0);
     REXCVAR_SET(skate3_draw_distance_stream_probe, 300.0);
+
+    s.applied = ReadMaxQualityValues();
   } else {
-    REXCVAR_SET(skate3_native_render_scene_msaa, s.msaa);
-    REXCVAR_SET(skate3_native_render_scene_shadow_tile, s.shadow_tile);
-    REXCVAR_SET(skate3_native_render_scene_shadow_static_size, s.static_size);
-    REXCVAR_SET(skate3_native_render_scene_shafts_steps, s.shafts_steps);
-    REXCVAR_SET(skate3_native_render_scene_ssao_full_res, s.ssao_full_res);
-    REXCVAR_SET(skate3_native_render_scene_hdr_packed, s.hdr_packed);
-    REXCVAR_SET(skate3_native_render_scene_hdr, s.hdr);
-    REXCVAR_SET(skate3_native_render_scene_bloom, s.bloom);
-    REXCVAR_SET(skate3_native_render_scene_shafts, s.shafts);
-    REXCVAR_SET(skate3_native_render_scene_ssao, s.ssao);
-    REXCVAR_SET(skate3_native_render_scene_shadows, s.shadows);
-    REXCVAR_SET(skate3_native_render_scene_shadow_static_casters,
-                s.static_casters);
-    REXCVAR_SET(skate3_native_render_scene_shadow_pcss, s.pcss);
-    REXCVAR_SET(skate3_draw_distance_scale, s.draw_scale);
-    REXCVAR_SET(skate3_lod_distance_scale, s.lod_scale);
-    REXCVAR_SET(skate3_draw_distance_stream_probe, s.stream_probe);
+    const MaxQualityValues& v = s.saved;
+    const MaxQualityValues& a = s.applied;
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_msaa), v.msaa, a.msaa);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_tile), v.shadow_tile,
+                         a.shadow_tile);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_static_size),
+                         v.static_size, a.static_size);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shafts_steps), v.shafts_steps,
+                         a.shafts_steps);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_ssao_full_res),
+                         v.ssao_full_res, a.ssao_full_res);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_hdr_packed), v.hdr_packed,
+                         a.hdr_packed);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_hdr), v.hdr, a.hdr);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_bloom), v.bloom, a.bloom);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shafts), v.shafts, a.shafts);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_ssao), v.ssao, a.ssao);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadows), v.shadows,
+                         a.shadows);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_static_casters),
+                         v.static_casters, a.static_casters);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_pcss), v.pcss, a.pcss);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_draw_distance_scale), v.draw_scale,
+                         a.draw_scale);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_lod_distance_scale), v.lod_scale, a.lod_scale);
+    RestoreUnlessChanged(REXCVAR_GET(skate3_draw_distance_stream_probe), v.stream_probe,
+                         a.stream_probe);
   }
   s.active = enable;
 }
@@ -265,8 +306,10 @@ REXCVAR_DEFINE_INT32(
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 void DrawMaxQualityToggle() {
-  bool on = s_max_quality.active;
+  bool on = s_max_quality.active || s_max_quality.suspended;
   if (ImGui::Checkbox("MAX QUALITY (photo mode)", &on)) {
+    // An explicit toggle overrides a pending resume.
+    s_max_quality.suspended = false;
     SetMaxQuality(on);
   }
   if (ImGui::IsItemHovered()) {
@@ -1112,6 +1155,32 @@ void DrawCachesSection() {
 }
 
 }  // namespace
+
+void WithMaxQualitySuspended(const std::function<void()>& fn) {
+  if (!s_max_quality.active) {
+    fn();
+    return;
+  }
+  SetMaxQuality(false);
+  fn();
+  SetMaxQuality(true);
+}
+
+void SuspendMaxQuality() {
+  if (s_max_quality.active) {
+    SetMaxQuality(false);
+    s_max_quality.suspended = true;
+    REXLOG_INFO("native-scene: max quality suspended while the settings menu is open");
+  }
+}
+
+void ResumeMaxQuality() {
+  if (s_max_quality.suspended) {
+    s_max_quality.suspended = false;
+    SetMaxQuality(true);
+    REXLOG_INFO("native-scene: max quality resumed");
+  }
+}
 
 void MaxQualityAutoCycle(uint64_t frame_number) {
   const int32_t period = REXCVAR_GET(skate3_native_render_scene_maxq_cycle);

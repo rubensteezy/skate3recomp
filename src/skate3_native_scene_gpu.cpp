@@ -5305,6 +5305,127 @@ void PrewarmCommit(const NativeGuestOutputRenderContext& context,
           .count()));
 }
 
+// SDK cvar overrides held by the yield / photo-flow gates below
+// (YieldForMenus, UpdatePhotoGrabWindow, YieldForPhotoDisplay). Each gate
+// used to keep its own static save/restore pair, which breaks as soon as two
+// overlap on one cvar: the second saves the first's FORCED value as "the
+// user's" (so its own restore is a no-op), and the first to release restores
+// the user's value out from under the other, still-open window (a menu
+// window closing mid photo-display pre-roll re-suppressed the pre-roll).
+// They also only released from RenderScene's normal path, so F5 to the
+// emulated renderer mid-window left the overrides applied indefinitely.
+//
+// Now each cvar has ONE override object: the user's value is saved when the
+// first owner acquires it and restored when the last owner releases it, and
+// RenderScene's scene-off early-out releases everything
+// (RestoreAllYieldOverrides). Every owner of a cvar forces the same value, so
+// the value lives on the object. Owners are level-triggered (Hold each frame
+// from their window state), so a gate whose override was dropped by the
+// restore-all re-acquires on its next frame instead of trusting a stale
+// "forced" flag. Render thread only.
+enum YieldOverrideOwner : uint32_t {
+  kOvrMenuContext = 1u << 0,   // YieldForMenus: menu un-suppression
+  kOvrPortraitWindow = 1u << 1,  // YieldForMenus: portrait RTT window
+  kOvrPhotoFlow = 1u << 2,     // UpdatePhotoGrabWindow: whole photo window
+  kOvrPhotoEmulated = 1u << 3,  // UpdatePhotoGrabWindow: emulated fallback
+  kOvrPhotoBurst = 1u << 4,    // UpdatePhotoGrabWindow: shutter burst
+  kOvrPhotoDisplay = 1u << 5,  // YieldForPhotoDisplay: pre-roll + yield
+};
+
+template <typename T>
+class SdkCvarOverride {
+ public:
+  // keep_user: when it returns true for the user's value, the override is
+  // tracked but nothing is written (the forced readback length only
+  // replaces a disabled <= 0 user setting, never a user-chosen length).
+  SdkCvarOverride(T& (*storage)(), T forced, bool (*keep_user)(T) = nullptr)
+      : storage_(storage), forced_(forced), keep_user_(keep_user) {}
+
+  void Hold(uint32_t owner, bool want) {
+    if (want) {
+      Acquire(owner);
+    } else {
+      Release(owner);
+    }
+  }
+  void Acquire(uint32_t owner) {
+    if (owners_ & owner) {
+      return;
+    }
+    if (owners_ == 0) {
+      saved_ = storage_();
+      written_ = saved_ != forced_ && !(keep_user_ && keep_user_(saved_));
+      if (written_) {
+        storage_() = forced_;
+      }
+    }
+    owners_ |= owner;
+  }
+  void Release(uint32_t owner) {
+    if ((owners_ & owner) == 0) {
+      return;
+    }
+    owners_ &= ~owner;
+    if (owners_ == 0 && written_) {
+      storage_() = saved_;
+      written_ = false;
+    }
+  }
+  // Returns true if any owner was holding it.
+  bool ReleaseAll() {
+    const bool held = owners_ != 0;
+    if (held) {
+      Release(owners_);
+    }
+    return held;
+  }
+  // The cvar currently carries the forced value in place of the user's.
+  bool Overriding() const { return written_; }
+
+ private:
+  T& (*storage_)();
+  T forced_;
+  bool (*keep_user_)(T);
+  uint32_t owners_ = 0;
+  T saved_{};
+  bool written_ = false;
+};
+
+// The photo grab target is 1152x640x4 = 0x2D0000 bytes (the same surface the
+// SDK's Import-Skater special case reads); the thumb path is smaller.
+// Framebuffer-sized resolves (0x384000 at 1280x720) stay excluded.
+constexpr int32_t kForceReadbackMaxLength = 0x2D0000;
+
+SdkCvarOverride<bool> g_ovr_suppress_draws(
+    []() -> bool& { return REXCVAR_GET(native_render_suppress_emulated_draws); }, false);
+SdkCvarOverride<int32_t> g_ovr_suppress_mode(
+    []() -> int32_t& { return REXCVAR_GET(native_render_suppress_mode); }, 3);
+SdkCvarOverride<bool> g_ovr_async_shaders(
+    []() -> bool& { return REXCVAR_GET(async_shader_compilation); }, false);
+SdkCvarOverride<int32_t> g_ovr_readback_len(
+    []() -> int32_t& {
+      return REXCVAR_GET(native_render_force_resolve_readback_max_length);
+    },
+    kForceReadbackMaxLength, [](int32_t user) { return user > 0; });
+SdkCvarOverride<bool> g_ovr_readback_halfpx(
+    []() -> bool& { return REXCVAR_GET(readback_resolve_half_pixel_offset); }, true);
+
+// RenderScene's early-out (native scene off / unsupported backend): the gates
+// that own these overrides stop running, so hand every cvar back to the
+// user's value here. The gates re-acquire on their next live frame.
+void RestoreAllYieldOverrides() {
+  bool any = g_ovr_suppress_draws.ReleaseAll();
+  any |= g_ovr_suppress_mode.ReleaseAll();
+  any |= g_ovr_async_shaders.ReleaseAll();
+  any |= g_ovr_readback_len.ReleaseAll();
+  any |= g_ovr_readback_halfpx.ReleaseAll();
+  if (any) {
+    REXLOG_INFO(
+        "native-scene: native scene inactive - SDK cvar overrides (suppression, "
+        "suppress mode, sync shaders, photo readback) restored");
+  }
+}
+
 // Render-thread mirror of the presence-context check (set in YieldForMenus):
 // menu screens shorten the 2D texture liveness recheck cadence so in-place
 // UI-texture rewrites (portrait resolves) heal fast.
@@ -5392,30 +5513,26 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   // pipeline keeps every RTT/composite current; the extra GPU cost is
   // menu-only. The saved value is restored on the first gameplay frame, so a
   // user toggle of the underlying cvar in the debug dialog survives (it is
-  // re-read at each menu entry).
+  // re-read at each menu entry). Held through g_ovr_suppress_draws, shared
+  // with the photo flow.
   {
     static bool s_unsup_forced = false;
-    static bool s_unsup_saved = false;
     const bool want =
         in_menus && REXCVAR_GET(skate3_native_render_scene_menu_unsuppress);
-    if (want && !s_unsup_forced) {
-      s_unsup_saved = REXCVAR_GET(native_render_suppress_emulated_draws);
-      if (s_unsup_saved) {
-        REXCVAR_SET(native_render_suppress_emulated_draws, false);
+    g_ovr_suppress_draws.Hold(kOvrMenuContext, want);
+    if (want != s_unsup_forced) {
+      s_unsup_forced = want;
+      if (want && g_ovr_suppress_draws.Overriding()) {
         REXLOG_INFO(
             "native-scene: menu context - emulated draw suppression OFF "
             "(one-shot render-to-texture passes execute; restored on "
             "gameplay)");
-      }
-      s_unsup_forced = true;
-    } else if (!want && s_unsup_forced) {
-      if (s_unsup_saved) {
-        REXCVAR_SET(native_render_suppress_emulated_draws, true);
+      } else if (!want) {
         REXLOG_INFO(
-            "native-scene: leaving menu context - emulated draw suppression "
-            "restored");
+            "native-scene: leaving menu context - emulated draw suppression {}",
+            g_ovr_suppress_draws.Overriding() ? "still lifted by the photo flow"
+                                              : "restored");
       }
-      s_unsup_forced = false;
     }
   }
   // Menu-context suppression FILTER relaxation (the near-native sibling of
@@ -5426,7 +5543,6 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   // active in menus the boxes stayed empty).
   {
     static bool s_mode_forced = false;
-    static int32_t s_mode_saved = 0;
     // menu_rtt_scope 1: only hold mode 0 inside the portrait window
     // (screen-transition grace / not-known-steady screens / CAS); outside
     // it, menus keep the gameplay-proven mode-2 suppression instead of
@@ -5436,32 +5552,13 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
         in_menus && REXCVAR_GET(skate3_native_render_scene_menu_rtt_passes) &&
         (REXCVAR_GET(skate3_native_render_scene_menu_rtt_scope) == 0 ||
          PortraitRttWindowActive());
-    if (want && !s_mode_forced) {
-      s_mode_saved = REXCVAR_GET(native_render_suppress_mode);
-      // Mode 3, not 0: the portrait-class RTTs (census 560-1200 during the
-      // window) execute, but the 1152-wide main scene + postfx band stays
-      // suppressed; mode 0 ran the game's whole pipeline at scaled
-      // resolution for the window's duration, dropping the pause menu to
-      // ~60 fps whenever a screen push (or its 3 s transition grace)
-      // opened the window.
-      if (s_mode_saved != 3) {
-        REXCVAR_SET(native_render_suppress_mode, 3);
-        REXLOG_INFO(
-            "native-scene: portrait window - suppress mode {} -> 3 (portrait "
-            "RTT passes execute, scene/postfx band stays suppressed; "
-            "restored when the window closes)",
-            s_mode_saved);
-      }
-      s_mode_forced = true;
-    } else if (!want && s_mode_forced) {
-      if (s_mode_saved != 3) {
-        REXCVAR_SET(native_render_suppress_mode, s_mode_saved);
-        REXLOG_INFO(
-            "native-scene: portrait window closed - suppress mode {} restored",
-            s_mode_saved);
-      }
-      s_mode_forced = false;
-    }
+    // Mode 3, not 0 (g_ovr_suppress_mode): the portrait-class RTTs (census
+    // 560-1200 during the window) execute, but the 1152-wide main scene +
+    // postfx band stays suppressed; mode 0 ran the game's whole pipeline at
+    // scaled resolution for the window's duration, dropping the pause menu to
+    // ~60 fps whenever a screen push (or its 3 s transition grace) opened the
+    // window.
+    g_ovr_suppress_mode.Hold(kOvrPortraitWindow, want);
     // Same menu window: shader compilation goes SYNCHRONOUS. With
     // async_shader_compilation on, the d3d12 command processor SKIPS any
     // draw whose pipeline is still compiling (command_processor.cpp
@@ -5470,23 +5567,28 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
     // are baked into the portrait forever (the armless/torso-less
     // skaters; later runs are fine because the
     // shader/pipeline disk storage is warm). Menus tolerate the one-time
-    // compile stalls invisibly.
-    static bool s_async_forced = false;
-    static bool s_async_saved = false;
-    if (want && !s_async_forced) {
-      s_async_saved = REXCVAR_GET(async_shader_compilation);
-      if (s_async_saved) {
-        REXCVAR_SET(async_shader_compilation, false);
+    // compile stalls invisibly. Shared with the photo flow through
+    // g_ovr_async_shaders.
+    g_ovr_async_shaders.Hold(kOvrPortraitWindow, want);
+    if (want != s_mode_forced) {
+      s_mode_forced = want;
+      if (want) {
+        if (g_ovr_suppress_mode.Overriding()) {
+          REXLOG_INFO(
+              "native-scene: portrait window - suppress mode -> 3 (portrait "
+              "RTT passes execute, scene/postfx band stays suppressed; "
+              "restored when the window closes)");
+        }
+        if (g_ovr_async_shaders.Overriding()) {
+          REXLOG_INFO(
+              "native-scene: menu context - shader compilation synchronous "
+              "(one-shot portrait renders can't skip still-compiling pieces)");
+        }
+      } else {
         REXLOG_INFO(
-            "native-scene: menu context - shader compilation synchronous "
-            "(one-shot portrait renders can't skip still-compiling pieces)");
+            "native-scene: portrait window closed - suppress mode {} restored",
+            REXCVAR_GET(native_render_suppress_mode));
       }
-      s_async_forced = true;
-    } else if (!want && s_async_forced) {
-      if (s_async_saved) {
-        REXCVAR_SET(async_shader_compilation, true);
-      }
-      s_async_forced = false;
     }
   }
   const bool in_loading = in_menus && !pause_native;
@@ -5816,37 +5918,30 @@ bool WriteGrabToGuest(uint8_t* base, const uint8_t* src) {
 // watchdog flips native -> emulated mid-window if no native grab write has
 // landed recently (mode toggle, unexpected yield, readback failure).
 void UpdatePhotoGrabWindow(uint8_t* base) {
-  // The grab target is 1152x640x4 = 0x2D0000 bytes (the same surface the
-  // SDK's Import-Skater special case reads); the thumb path is smaller.
-  // Framebuffer-sized resolves (0x384000 at 1280x720) stay excluded.
-  constexpr int32_t kForceReadbackMaxLength = 0x2D0000;
   static bool s_armed = false;
   static bool s_emulated_armed = false;
   static bool s_burst_armed = false;
   static int64_t s_arm_ns = 0;
   static int64_t s_last_run_ns = 0;
-  static int32_t s_readback_saved = 0;
-  static bool s_suppress_saved = false;
-  static bool s_halfpx_saved = false;
-  static int32_t s_burst_max_saved = 0;
-  static bool s_burst_suppress_saved = false;
-  static bool s_burst_halfpx_saved = false;
   static int64_t s_burst_open_ns = 0;
   const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              PerfClock::now().time_since_epoch())
                              .count();
+  // The emulated fallback and the shutter burst both force the same three
+  // SDK cvars (small-resolve readback length, suppression lifted, half-pixel
+  // readback); held as two owners of the shared overrides, level-triggered
+  // from the window state (see SdkCvarOverride).
+  const auto sync_overrides = [] {
+    g_ovr_readback_len.Hold(kOvrPhotoEmulated, s_emulated_armed);
+    g_ovr_suppress_draws.Hold(kOvrPhotoEmulated, s_emulated_armed);
+    g_ovr_readback_halfpx.Hold(kOvrPhotoEmulated, s_emulated_armed);
+    g_ovr_readback_len.Hold(kOvrPhotoBurst, s_burst_armed);
+    g_ovr_suppress_draws.Hold(kOvrPhotoBurst, s_burst_armed);
+    g_ovr_readback_halfpx.Hold(kOvrPhotoBurst, s_burst_armed);
+  };
   const auto disarm_burst = [&] {
     s_burst_armed = false;
-    if (s_burst_max_saved <= 0) {
-      REXCVAR_SET(native_render_force_resolve_readback_max_length,
-                  s_burst_max_saved);
-    }
-    if (s_burst_suppress_saved) {
-      REXCVAR_SET(native_render_suppress_emulated_draws, true);
-    }
-    if (!s_burst_halfpx_saved) {
-      REXCVAR_SET(readback_resolve_half_pixel_offset, false);
-    }
+    sync_overrides();
   };
   // This function only runs while the native renderer is producing frames
   // (RenderScene). A gap means the native path was toggled off or yielding
@@ -5871,24 +5966,14 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
   // Same window arms the photo postfx constant capture (CapturePfxConstants
   // runs on the guest thread at the draw-done hook).
   g_photo_flow_frame.store(want, std::memory_order_relaxed);
+  // Forces the small-resolve readback (kForceReadbackMaxLength, unless the
+  // user set a length), lifts suppression, and samples host-pixel CENTERS in
+  // the scaled->1x readback extraction while the window is armed (photo
+  // quality: undoes the D3D9 half-pixel shift that becomes a scale/2-pixel
+  // offset at scaled resolutions).
   const auto arm_emulated = [&] {
-    s_readback_saved = REXCVAR_GET(native_render_force_resolve_readback_max_length);
-    if (s_readback_saved <= 0) {
-      REXCVAR_SET(native_render_force_resolve_readback_max_length,
-                  kForceReadbackMaxLength);
-    }
-    s_suppress_saved = REXCVAR_GET(native_render_suppress_emulated_draws);
-    if (s_suppress_saved) {
-      REXCVAR_SET(native_render_suppress_emulated_draws, false);
-    }
-    // Sample host-pixel CENTERS in the scaled->1x readback extraction while
-    // the window is armed (photo quality: undoes the D3D9 half-pixel shift
-    // that becomes a scale/2-pixel offset at scaled resolutions).
-    s_halfpx_saved = REXCVAR_GET(readback_resolve_half_pixel_offset);
-    if (!s_halfpx_saved) {
-      REXCVAR_SET(readback_resolve_half_pixel_offset, true);
-    }
     s_emulated_armed = true;
+    sync_overrides();
   };
   // Shader compilation goes SYNCHRONOUS for the whole photo flow; the
   // menus lesson applied here: with async_shader_compilation on, the d3d12
@@ -5899,22 +5984,16 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
   // draws were skipped at the exact moment they finally ran, which is why
   // the card stayed un-framed EVEN IN EMULATED rendering.
   // One-time compile stalls during a photo UI moment are invisible.
+  // Shared with the menus' portrait window through g_ovr_async_shaders.
   static bool s_async_forced = false;
-  static bool s_async_saved = false;
-  if (want && !s_async_forced) {
-    s_async_saved = REXCVAR_GET(async_shader_compilation);
-    if (s_async_saved) {
-      REXCVAR_SET(async_shader_compilation, false);
+  g_ovr_async_shaders.Hold(kOvrPhotoFlow, want);
+  if (want != s_async_forced) {
+    s_async_forced = want;
+    if (want && g_ovr_async_shaders.Overriding()) {
       REXLOG_INFO(
           "native-scene: photo flow - shader compilation synchronous (the "
           "one-shot card compose can't skip still-compiling draws)");
     }
-    s_async_forced = true;
-  } else if (!want && s_async_forced) {
-    if (s_async_saved) {
-      REXCVAR_SET(async_shader_compilation, true);
-    }
-    s_async_forced = false;
   }
   if (want && !s_armed) {
     s_armed = true;
@@ -5939,7 +6018,7 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
           "native-scene: photo flow - forcing small-resolve CPU readback "
           "(the photo grab reads the resolved screenshot target from guest "
           "memory){}",
-          s_suppress_saved ? " + emulated draw suppression OFF" : "");
+          g_ovr_suppress_draws.Overriding() ? " + emulated draw suppression OFF" : "");
     }
   } else if (!want && s_armed) {
     s_armed = false;
@@ -5955,19 +6034,10 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
     }
     if (s_emulated_armed) {
       s_emulated_armed = false;
-      if (s_readback_saved <= 0) {
-        REXCVAR_SET(native_render_force_resolve_readback_max_length,
-                    s_readback_saved);
-      }
-      if (s_suppress_saved) {
-        REXCVAR_SET(native_render_suppress_emulated_draws, true);
-      }
-      if (!s_halfpx_saved) {
-        REXCVAR_SET(readback_resolve_half_pixel_offset, false);
-      }
+      sync_overrides();
       REXLOG_INFO(
-          "native-scene: photo flow ended - resolve readback{} restored",
-          s_suppress_saved ? " + suppression" : "");
+          "native-scene: photo flow ended - resolve readback + suppression "
+          "overrides released");
     }
   }
   // Watchdog: native mode armed but no grab write has landed within 700 ms
@@ -5993,7 +6063,7 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
       REXLOG_WARN(
           "native-scene: photo flow - native grab produced no frames for "
           "700 ms; falling back to the forced-readback window{}",
-          s_suppress_saved ? " + suppression lifted" : "");
+          g_ovr_suppress_draws.Overriding() ? " + suppression lifted" : "");
     }
   }
   // SHUTTER BURST: the game builds the framed card as a dedicated frame
@@ -6029,19 +6099,7 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
         req >= 0 && now_ns - req < 1'500'000'000 && !grab_done;
     if (burst_want && !s_burst_armed) {
       s_burst_armed = true;
-      s_burst_max_saved =
-          REXCVAR_GET(native_render_force_resolve_readback_max_length);
-      if (s_burst_max_saved <= 0) {
-        REXCVAR_SET(native_render_force_resolve_readback_max_length, 0x2D0000);
-      }
-      s_burst_suppress_saved = REXCVAR_GET(native_render_suppress_emulated_draws);
-      if (s_burst_suppress_saved) {
-        REXCVAR_SET(native_render_suppress_emulated_draws, false);
-      }
-      s_burst_halfpx_saved = REXCVAR_GET(readback_resolve_half_pixel_offset);
-      if (!s_burst_halfpx_saved) {
-        REXCVAR_SET(readback_resolve_half_pixel_offset, true);
-      }
+      sync_overrides();
       s_burst_open_ns = now_ns;
       REXLOG_INFO(
           "native-scene: photo grab REQUEST - shutter burst OPEN "
@@ -6057,6 +6115,9 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
           grab_done ? "grab completed" : "1.5 s cap");
     }
   }
+  // Level-triggered re-sync: re-acquires whatever RestoreAllYieldOverrides
+  // dropped while the native scene was off.
+  sync_overrides();
 }
 
 // Photo display-card screen: yield to the emulated output while the framed
@@ -6076,7 +6137,6 @@ bool YieldForPhotoDisplay() {
   constexpr int64_t kCardGoneNs = 250'000'000;
   constexpr int64_t kPreRollNs = 250'000'000;
   static bool s_preroll = false;
-  static bool s_suppress_saved = false;
   static int64_t s_preroll_ns = 0;
   // Default OFF since the shutter burst was added: the framed card
   // is CPU-composed into the card texture at the grab, and the native 2D
@@ -6086,9 +6146,7 @@ bool YieldForPhotoDisplay() {
   if (!REXCVAR_GET(skate3_native_render_scene_photo_display_yield)) {
     if (s_preroll) {
       s_preroll = false;
-      if (s_suppress_saved) {
-        REXCVAR_SET(native_render_suppress_emulated_draws, true);
-      }
+      g_ovr_suppress_draws.Release(kOvrPhotoDisplay);
       if (g_photo_display_yielding.exchange(false, std::memory_order_relaxed)) {
         g_photo_display_yield_end_ns.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -6108,9 +6166,7 @@ bool YieldForPhotoDisplay() {
   if (!card_up) {
     if (s_preroll) {
       s_preroll = false;
-      if (s_suppress_saved) {
-        REXCVAR_SET(native_render_suppress_emulated_draws, true);
-      }
+      g_ovr_suppress_draws.Release(kOvrPhotoDisplay);
       if (g_photo_display_yielding.exchange(false, std::memory_order_relaxed)) {
         g_photo_display_yield_end_ns.store(now_ns, std::memory_order_relaxed);
         REXLOG_INFO(
@@ -6120,13 +6176,12 @@ bool YieldForPhotoDisplay() {
     }
     return false;
   }
+  // Re-acquired every card-up frame (idempotent), so a restore-all while the
+  // native scene was off cannot leave the pre-roll running suppressed.
+  g_ovr_suppress_draws.Acquire(kOvrPhotoDisplay);
   if (!s_preroll) {
     s_preroll = true;
     s_preroll_ns = now_ns;
-    s_suppress_saved = REXCVAR_GET(native_render_suppress_emulated_draws);
-    if (s_suppress_saved) {
-      REXCVAR_SET(native_render_suppress_emulated_draws, false);
-    }
     REXLOG_INFO(
         "native-scene: photo display card up - emulated pre-roll "
         "(suppression lifted; yielding to the emulated output in {} ms so "
@@ -7783,6 +7838,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   if (!SceneEnabled() ||
       (context.backend != NativeGuestOutputBackend::kD3D12 &&
        context.backend != NativeGuestOutputBackend::kVulkan)) {
+    // The yield / photo gates below stop running here; don't leave their SDK
+    // cvar overrides applied to the emulated renderer (F5 mid-menu or
+    // mid-photo-flow).
+    RestoreAllYieldOverrides();
     return false;
   }
   {
