@@ -71,10 +71,10 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_ssao);
 REXCVAR_DECLARE(double, skate3_native_render_scene_ssao_radius);
 REXCVAR_DECLARE(double, skate3_native_render_scene_ssao_intensity);
 REXCVAR_DECLARE(double, skate3_native_render_scene_ssao_luma_protect);
-REXCVAR_DECLARE(bool, skate3_native_render_scene_shadow_static_casters);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_experimental_static_shadows);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_static_strength);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_static_radius);
-REXCVAR_DECLARE(bool, skate3_native_render_scene_shadow_pcss);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_experimental_pcss);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_pcss_sun_deg);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_pcss_max_m);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_static_bias);
@@ -179,7 +179,6 @@ int32_t ValueCombo(const char* label, int32_t value, const int32_t* values,
 struct MaxQualityValues {
   int32_t msaa;
   int32_t shadow_tile;
-  int32_t static_size;
   int32_t shafts_steps;
   bool ssao_full_res;
   bool hdr_packed;
@@ -188,8 +187,6 @@ struct MaxQualityValues {
   bool shafts;
   bool ssao;
   bool shadows;
-  bool static_casters;
-  bool pcss;
   double draw_scale;
   double lod_scale;
   double stream_probe;
@@ -199,7 +196,6 @@ MaxQualityValues ReadMaxQualityValues() {
   MaxQualityValues v;
   v.msaa = REXCVAR_GET(skate3_native_render_scene_msaa);
   v.shadow_tile = REXCVAR_GET(skate3_native_render_scene_shadow_tile);
-  v.static_size = REXCVAR_GET(skate3_native_render_scene_shadow_static_size);
   v.shafts_steps = REXCVAR_GET(skate3_native_render_scene_shafts_steps);
   v.ssao_full_res = REXCVAR_GET(skate3_native_render_scene_ssao_full_res);
   v.hdr_packed = REXCVAR_GET(skate3_native_render_scene_hdr_packed);
@@ -208,8 +204,6 @@ MaxQualityValues ReadMaxQualityValues() {
   v.shafts = REXCVAR_GET(skate3_native_render_scene_shafts);
   v.ssao = REXCVAR_GET(skate3_native_render_scene_ssao);
   v.shadows = REXCVAR_GET(skate3_native_render_scene_shadows);
-  v.static_casters = REXCVAR_GET(skate3_native_render_scene_shadow_static_casters);
-  v.pcss = REXCVAR_GET(skate3_native_render_scene_shadow_pcss);
   v.draw_scale = REXCVAR_GET(skate3_draw_distance_scale);
   v.lod_scale = REXCVAR_GET(skate3_lod_distance_scale);
   v.stream_probe = REXCVAR_GET(skate3_draw_distance_stream_probe);
@@ -248,7 +242,6 @@ void SetMaxQuality(bool enable) {
 
     REXCVAR_SET(skate3_native_render_scene_msaa, 8);
     REXCVAR_SET(skate3_native_render_scene_shadow_tile, 4096);
-    REXCVAR_SET(skate3_native_render_scene_shadow_static_size, 8192);
     REXCVAR_SET(skate3_native_render_scene_shafts_steps, 64);
     REXCVAR_SET(skate3_native_render_scene_ssao_full_res, true);
     REXCVAR_SET(skate3_native_render_scene_hdr_packed, false);  // RGBA16F
@@ -257,8 +250,6 @@ void SetMaxQuality(bool enable) {
     REXCVAR_SET(skate3_native_render_scene_shafts, true);
     REXCVAR_SET(skate3_native_render_scene_ssao, true);
     REXCVAR_SET(skate3_native_render_scene_shadows, true);
-    REXCVAR_SET(skate3_native_render_scene_shadow_static_casters, true);
-    REXCVAR_SET(skate3_native_render_scene_shadow_pcss, true);
     // The largest steps the settings menu offers (tested territory).
     REXCVAR_SET(skate3_draw_distance_scale, 5.0);
     REXCVAR_SET(skate3_lod_distance_scale, 5.0);
@@ -271,8 +262,6 @@ void SetMaxQuality(bool enable) {
     RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_msaa), v.msaa, a.msaa);
     RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_tile), v.shadow_tile,
                          a.shadow_tile);
-    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_static_size),
-                         v.static_size, a.static_size);
     RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shafts_steps), v.shafts_steps,
                          a.shafts_steps);
     RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_ssao_full_res),
@@ -285,9 +274,6 @@ void SetMaxQuality(bool enable) {
     RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_ssao), v.ssao, a.ssao);
     RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadows), v.shadows,
                          a.shadows);
-    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_static_casters),
-                         v.static_casters, a.static_casters);
-    RestoreUnlessChanged(REXCVAR_GET(skate3_native_render_scene_shadow_pcss), v.pcss, a.pcss);
     RestoreUnlessChanged(REXCVAR_GET(skate3_draw_distance_scale), v.draw_scale,
                          a.draw_scale);
     RestoreUnlessChanged(REXCVAR_GET(skate3_lod_distance_scale), v.lod_scale, a.lod_scale);
@@ -315,7 +301,7 @@ void DrawMaxQualityToggle() {
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip(
         "Push every quality setting to its maximum for recording: MSAA 8x,\n"
-        "4096 shadow tiles, 8192 static sun map, full-res SSAO, RGBA16F\n"
+        "4096 shadow tiles, full-res SSAO, RGBA16F\n"
         "HDR, max shaft steps, 5x draw/LOD distance, 300 m streaming, all\n"
         "quality features on. GPU-heavy; previous values restore when\n"
         "unchecked. Applies live (a one-frame pipeline rebuild).");
@@ -803,15 +789,16 @@ void DrawShadowsSection() {
               CvarCheckbox("Dynamic shadows",
                            REXCVAR_GET(skate3_native_render_scene_shadows),
                            "Native CSM: skater/NPC/prop shadows onto the world"));
-  REXCVAR_SET(skate3_native_render_scene_shadow_static_casters,
+  REXCVAR_SET(skate3_native_render_scene_experimental_static_shadows,
               CvarCheckbox(
-                  "Static sun shadows",
-                  REXCVAR_GET(skate3_native_render_scene_shadow_static_casters),
+                  "Static sun shadows (experimental)",
+                  REXCVAR_GET(skate3_native_render_scene_experimental_static_shadows),
                   "Native static sun-shadow map: buildings, trees, rails and "
                   "placed props cast live shadows from a dedicated "
                   "sun-aligned depth map: shade on characters and props, "
                   "and shadows that follow a moved sun. The game's own "
-                  "dynamic shadow cascades are untouched."));
+                  "dynamic shadow cascades are untouched. Shelved (KI-5): reads as "
+                  "odd extra shadows in places; off by default."));
   REXCVAR_SET(
       skate3_native_render_scene_shadow_static_strength,
       CvarSlider(
@@ -830,12 +817,13 @@ void DrawShadowsSection() {
           "Far-cascade half-extent of the static sun-shadow map (mid and "
           "inner cascades cover 1/2 and 1/6 at 2x/6x density). Larger "
           "reaches farther at lower far-cascade density."));
-  REXCVAR_SET(skate3_native_render_scene_shadow_pcss,
+  REXCVAR_SET(skate3_native_render_scene_experimental_pcss,
               CvarCheckbox(
-                  "Soft shadows (PCSS)",
-                  REXCVAR_GET(skate3_native_render_scene_shadow_pcss),
+                  "Soft shadows (PCSS, experimental)",
+                  REXCVAR_GET(skate3_native_render_scene_experimental_pcss),
                   "Contact-hardening filter: crisp where a shadow touches "
-                  "its caster, progressively softer with caster height."));
+                  "its caster, progressively softer with caster height. Shelved "
+                  "(KI-5); off = the game-exact atlas sampling."));
   REXCVAR_SET(skate3_native_render_scene_shadow_pcss_sun_deg,
               CvarSlider(
                   "sun angular size (deg)",

@@ -33,6 +33,7 @@ Changes in this fork so far:
 - Moved to rexglue SDK 0.10.0. GPU emulation now ships as a separate library next to the executable.
 - Fixed a Direct3D 12 crash after extended play: the shader-visible descriptor heap leaked binding-table slots during world streaming until it ran out, which led to device removal (fixed in the SDK fork).
 - Fixed static shadows rendering pure black on frames with no dynamic shadow caster, such as in-game cutscene cameras.
+- Removed the Enhanced Shadows and PCSS Shadows options. Instead of improving on the game's own shadows, they mostly added odd, blocky extra shadows. The code is still there, off by default, for a later revisit.
 - Merged community fixes that were never reviewed upstream: Hall of Meat injury highlights and lens effects, seamless character fades (returning to a marker no longer fades the skater in as separate patches with visible seams where body pieces overlap), the shirt vanishing or lagging while its cloth sim is active, custom-map (SkateIT/ArenaBuilder) geometry and texture coordinates, and cross-platform drone/freecam input.
 - Fresh recursive clones build again: the SDK's imgui submodule pointed at commits that were never published, and now fetches from a published fork.
 - Building from source can use the title update patches already present in an installed game folder, so the separate title update package is no longer required.
@@ -83,7 +84,7 @@ Since v2.0.0 the game no longer relies on emulating the Xbox 360 GPU. A native r
 
 - The native renderer is on by default. Settings > Video > Renderer switches between Native and Emulated live, and F5 hot-toggles between them at any time. If the native renderer ever hits an unrecoverable error, the game falls back to the emulated renderer and shows a corner indicator; F5 retries the native path.
 - On Windows, a single build ships both graphics API backends: Settings > Video > Graphics API selects DirectX 12 or Vulkan (applied with Apply & Restart; DirectX 12 is preferred by default). Linux uses Vulkan, and macOS uses Vulkan through MoltenVK.
-- Optional enhancements beyond the original game live under Settings > Video: MSAA up to 8x, enhanced real-time sun shadows with contact-hardening soft shadows, ambient occlusion, bloom, volumetric lighting, extended draw distance and world streaming, render scale up to 3x, and true ultrawide.
+- Optional enhancements beyond the original game live under Settings > Video: MSAA up to 8x, ambient occlusion, bloom, volumetric lighting, extended draw distance and world streaming, render scale up to 3x, and true ultrawide.
 
 Known issues:
 
