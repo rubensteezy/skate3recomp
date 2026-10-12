@@ -6,6 +6,7 @@
 #include "skate3_iso_installer.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
+#include "skate3_options_menu.h"
 #include "skate3_screenshot.h"
 #include "skate3_shader_disasm.h"
 #include "skate3_win_icon.h"
@@ -806,6 +807,16 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
+  // "PC Settings" row in the game's Options screen. Selection arrives on the
+  // guest thread; open (never toggle closed) the overlay on the UI thread.
+  skate3::options_menu::SetOpenSettingsCallback([this]() {
+    app_context().CallInUIThreadDeferred([this]() {
+      if (!simple_settings_dialog_ || !simple_settings_dialog_->visible()) {
+        ToggleSimpleSettings();
+      }
+    });
+  });
+  skate3::options_menu::Install();
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
                                           eawebkit_PPCImageConfig.image_base,
