@@ -2,19 +2,21 @@
 
 #include <functional>
 
-// "PC Settings" row in the game's own Options screen (FrontEndState_Options,
-// options.apt). Selecting it opens the host settings overlay, so the recomp
-// settings are reachable from the in-game menus as well as from Escape.
+// "PC Settings" page in the game's own Options screen (FrontEndState_Options,
+// options.apt): the live recomp settings as native selector rows, plus a row
+// that opens the full host settings overlay.
 namespace skate3::options_menu {
 
-// Patches the row into the root Options layout. Call once after the XEX image
-// is loaded and before the guest launches. No-op (logged) when the image does
-// not match the expected title update layout or the cvar is off.
+// Adds the PC Settings row to the root Options layout. Call once after the XEX
+// image is loaded and before the guest launches. No-op (logged) when the image
+// does not match the expected title update layout or the cvar is off.
 void Install();
 
-// Invoked from the guest thread when the row is selected; the callback must
-// marshal to the UI thread itself. Set during app setup, before the guest
-// boots.
+// Both callbacks are invoked from the guest thread and must marshal to the UI
+// thread themselves. Set during app setup, before the guest boots.
+// Open: the "All PC Settings" row was selected.
 void SetOpenSettingsCallback(std::function<void()> callback);
+// Save: a page row changed its cvars; persist the user settings file.
+void SetSaveSettingsCallback(std::function<void()> callback);
 
 }  // namespace skate3::options_menu

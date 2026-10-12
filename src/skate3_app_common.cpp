@@ -807,14 +807,19 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
-  // "PC Settings" row in the game's Options screen. Selection arrives on the
-  // guest thread; open (never toggle closed) the overlay on the UI thread.
+  // "PC Settings" page in the game's Options screen. Both callbacks arrive on
+  // the guest thread: open (never toggle closed) the overlay and persist row
+  // changes on the UI thread.
   skate3::options_menu::SetOpenSettingsCallback([this]() {
     app_context().CallInUIThreadDeferred([this]() {
       if (!simple_settings_dialog_ || !simple_settings_dialog_->visible()) {
         ToggleSimpleSettings();
       }
     });
+  });
+  skate3::options_menu::SetSaveSettingsCallback([this]() {
+    app_context().CallInUIThreadDeferred(
+        [this]() { rex::ui::SaveSimpleSettingsConfig(user_settings_path_); });
   });
   skate3::options_menu::Install();
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
