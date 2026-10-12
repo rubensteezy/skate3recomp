@@ -3062,16 +3062,59 @@ bool PhotoCardVisible() {
   return now_ns - seen < 250'000'000;
 }
 
-// Debug-path classification, cached per shader object (guest render thread
-// only, like the blur classifier). -1 = not a photo postfx shader.
+namespace {
+
+// Advanced once per guest frame at the top of BuildFrameScene (before its
+// scene-off early-out, so it also ticks while F5 has the scene disabled).
+std::atomic<uint64_t> g_shader_memo_epoch{0};
+
+// Debug-path verdict memo shared by the per-object shader classifiers.
+// Guest shader objects are recycled while streaming (see screen_fx.h): a
+// verdict keyed by object address alone outlived its shader and was served
+// to whatever the game loaded at that address next (a foreign PS inheriting
+// a cached env-receiver "yes" reopens the flowingwater tone hijack).
+// Entries are trusted only within the guest frame that computed them: the
+// first lookup in a later frame re-reads the path, so a recycled address is
+// reclassified by its next frame at the latest, while the per-draw lookups
+// within a frame stay one hash probe. Not thread-safe; each memo belongs to
+// the guest render thread (or to its owner's lock).
+template <typename V>
+class ShaderVerdictMemo {
+ public:
+  const V* Find(uint32_t obj) const {
+    const auto it = map_.find(obj);
+    if (it == map_.end() ||
+        it->second.epoch != g_shader_memo_epoch.load(std::memory_order_relaxed)) {
+      return nullptr;
+    }
+    return &it->second.verdict;
+  }
+  void Store(uint32_t obj, V verdict) {
+    if (map_.size() >= 4096 && map_.find(obj) == map_.end()) {
+      map_.clear();
+    }
+    map_[obj] = {verdict, g_shader_memo_epoch.load(std::memory_order_relaxed)};
+  }
+
+ private:
+  struct Entry {
+    V verdict;
+    uint64_t epoch;
+  };
+  std::unordered_map<uint32_t, Entry> map_;
+};
+
+}  // namespace
+
+// Debug-path classification, memoized per shader object (guest render
+// thread only, like the blur classifier). -1 = not a photo postfx shader.
 int ClassifyPfxShader(uint8_t* base, uint32_t obj) {
   if (obj == 0 || !GuestReadableApprox(base, obj)) {
     return -1;
   }
-  static std::unordered_map<uint32_t, int> cache;
-  auto it = cache.find(obj);
-  if (it != cache.end()) {
-    return it->second;
+  static ShaderVerdictMemo<int> cache;
+  if (const int* hit = cache.Find(obj)) {
+    return *hit;
   }
   char text[112] = {};
   for (int k = 0; k < 111; ++k) {
@@ -3093,9 +3136,7 @@ int ClassifyPfxShader(uint8_t* base, uint32_t obj) {
   } else if (std::strstr(text, "postfx_basictex_fisheye") != nullptr) {
     pass = kPfxFisheye;
   }
-  if (cache.size() < 4096) {
-    cache.emplace(obj, pass);
-  }
+  cache.Store(obj, pass);
   return pass;
 }
 
@@ -3280,16 +3321,15 @@ uint32_t Phase2dFlags() {
 
 
 
-// Guest render thread only: per-object cached debug-path classifier
+// Guest render thread only: per-object memoized debug-path classifier
 // (same pattern as ClassifySplineShader).
 bool IsCasEditorPs(uint8_t* base, uint32_t obj) {
   if (obj < 0x10000) {
     return false;
   }
-  static std::unordered_map<uint32_t, bool> cache;
-  auto it = cache.find(obj);
-  if (it != cache.end()) {
-    return it->second;
+  static ShaderVerdictMemo<bool> cache;
+  if (const bool* hit = cache.Find(obj)) {
+    return *hit;
   }
   char text[97] = {};
   if (!GuestTryCopy(text, base + obj + 0x54, 96)) {
@@ -3302,10 +3342,7 @@ bool IsCasEditorPs(uint8_t* base, uint32_t obj) {
       std::strstr(leaf, "_nis") != nullptr &&
       (std::strncmp(leaf, "cacstamp_", 9) == 0 || std::strncmp(leaf, "cac_", 4) == 0 ||
        std::strncmp(leaf, "defaultcharacter_", 17) == 0);
-  if (cache.size() > 4096) {
-    cache.clear();
-  }
-  cache.emplace(obj, cas);
+  cache.Store(obj, cas);
   return cas;
 }
 
@@ -4464,9 +4501,18 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
   // The decoded HoM VS declares i_boneArray at c7 for 183 float4 rows:
   // 61 bones. Later registers are unrelated parameters, not extra bones.
   const uint32_t palette_floats = hom_shader ? 61u * 12u : kPaletteFloats;
+  // Whole bones only, and only from inside the 256-register VS bank (the
+  // bound SkinPointBankRows scores with): 84 bones fill c4..c255 exactly, so
+  // a palette refined to c5/c7/c8 would otherwise read up to 4 registers past
+  // c255 into whatever the device shadow stores next. The tail bones stage
+  // as zeros; no shader bound at that base can index them.
+  const uint32_t bank_floats = palette_base < 256 ? (256 - palette_base) * 4 : 0;
+  const uint32_t in_bank_floats = std::min(palette_floats, bank_floats / 12 * 12);
   item.bones.resize(palette_floats);
   for (uint32_t i = 0; i < palette_floats; ++i) {
-    const float f = LoadGuestF32(base, bank + (palette_base * 4 + i) * 4);
+    const float f = i < in_bank_floats
+                        ? LoadGuestF32(base, bank + (palette_base * 4 + i) * 4)
+                        : 0.0f;
     item.bones[i] = (f > -1e7f && f < 1e7f) ? f : 0.0f;
   }
   if (item.hair) {
@@ -4814,19 +4860,19 @@ namespace {
 
 // Guest shader objects carry their compiled-source debug path at +0x54
 // ("D:\P4\xbox2-ww-f\...\spline_darkenPS.updb"); the spline renderer's pixel
-// shaders identify the in-world neon guide elements. Cached per object;
-// the current pixel/vertex object trackers are checked both ways because the
-// hook labels are swapped relative to the real shader types.
+// shaders identify the in-world neon guide elements. Memoized per object
+// (ShaderVerdictMemo); the current pixel/vertex object trackers are checked
+// both ways because the hook labels are swapped relative to the real shader
+// types.
 uint32_t ClassifySplineShader(uint8_t* base, uint32_t obj) {
   if (obj < 0x10000) {
     return 0;
   }
   static std::mutex mu;
-  static std::unordered_map<uint32_t, uint32_t> cache;
+  static ShaderVerdictMemo<uint32_t> cache;
   std::lock_guard<std::mutex> lock(mu);
-  auto it = cache.find(obj);
-  if (it != cache.end()) {
-    return it->second;
+  if (const uint32_t* hit = cache.Find(obj)) {
+    return *hit;
   }
   char path[97] = {};
   uint32_t kind = 0;
@@ -4838,7 +4884,7 @@ uint32_t ClassifySplineShader(uint8_t* base, uint32_t obj) {
       kind = 2;
     }
   }
-  cache.emplace(obj, kind);
+  cache.Store(obj, kind);
   return kind;
 }
 
@@ -4953,10 +4999,9 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           if (obj < 0x10000 || !GuestReadableApprox(base, obj)) {
             return 0;
           }
-          static std::unordered_map<uint32_t, int> cache;
-          auto it = cache.find(obj);
-          if (it != cache.end()) {
-            return it->second;
+          static ShaderVerdictMemo<int> cache;
+          if (const int* cached = cache.Find(obj)) {
+            return *cached;
           }
           char text[120] = {};
           for (int k = 0; k < 119; ++k) {
@@ -4969,8 +5014,8 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           // Empty/garbled paths stay unknown (0) and are not cached-in as
           // negatives forever.
           const int result = text[0] == '\0' ? 0 : (hit ? 2 : 1);
-          if (result != 0 && cache.size() < 4096) {
-            cache.emplace(obj, result);
+          if (result != 0) {
+            cache.Store(obj, result);
           }
           return result;
         };
@@ -5329,10 +5374,9 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
           if (obj < 0x10000 || !GuestReadableApprox(base, obj)) {
             return 0;
           }
-          static std::unordered_map<uint32_t, int> cache;
-          auto it = cache.find(obj);
-          if (it != cache.end()) {
-            return it->second;
+          static ShaderVerdictMemo<int> cache;
+          if (const int* cached = cache.Find(obj)) {
+            return *cached;
           }
           char text[96] = {};
           for (int k = 0; k < 95; ++k) {
@@ -5350,9 +5394,7 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
                          nullptr) {
             fam = 3;
           }
-          if (cache.size() < 4096) {
-            cache.emplace(obj, fam);
-          }
+          cache.Store(obj, fam);
           return fam;
         };
         int fam = world_family(g_cur_ps_obj.load(std::memory_order_relaxed));
@@ -5471,10 +5513,9 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
         return false;
       }
       // Guest-render-thread only (like the fog capture globals).
-      static std::unordered_map<uint32_t, bool> cache;
-      auto it = cache.find(obj);
-      if (it != cache.end()) {
-        return it->second;
+      static ShaderVerdictMemo<bool> cache;
+      if (const bool* cached = cache.Find(obj)) {
+        return *cached;
       }
       // Debug path at +0x54, e.g. ".../blur_hBlurPS.updb".
       char text[96] = {};
@@ -5483,9 +5524,7 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
         if (text[k] == '\0') break;
       }
       const bool hit = std::strstr(text, "blur_hBlurPS") != nullptr;
-      if (cache.size() < 1024) {
-        cache.emplace(obj, hit);
-      }
+      cache.Store(obj, hit);
       return hit;
     };
     // Shader labels can be swapped in the hook; accept either slot.
@@ -5548,17 +5587,16 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
   // draw refreshes the outline color.
   if (flags2d == 0 && SceneEnabled() &&
       REXCVAR_GET(skate3_native_render_scene_selection_outline)) {
-    // Debug-path family, cached per shader object (guest render thread only,
-    // like the blur classifier). 1 = sky, 2 = park piece / dynamic object,
-    // 3 = postfx_edgedetectstencil.
+    // Debug-path family, memoized per shader object (guest render thread
+    // only, like the blur classifier). 1 = sky, 2 = park piece / dynamic
+    // object, 3 = postfx_edgedetectstencil.
     const auto family_of = [&](uint32_t obj) -> int {
       if (obj == 0 || !GuestReadableApprox(base, obj)) {
         return 0;
       }
-      static std::unordered_map<uint32_t, int> cache;
-      auto it = cache.find(obj);
-      if (it != cache.end()) {
-        return it->second;
+      static ShaderVerdictMemo<int> cache;
+      if (const int* cached = cache.Find(obj)) {
+        return *cached;
       }
       char text[120] = {};
       for (int k = 0; k < 119; ++k) {
@@ -5574,9 +5612,7 @@ void OnDrawDone(uint8_t* base, uint32_t func, uint32_t r4, uint32_t r5, uint32_t
       } else if (std::strstr(text, "postfx_edgedetectstencil") != nullptr) {
         fam = 3;
       }
-      if (cache.size() < 4096) {
-        cache.emplace(obj, fam);
-      }
+      cache.Store(obj, fam);
       return fam;
     };
     // Shader labels can be swapped in the hook; accept either slot.
@@ -8709,6 +8745,9 @@ void WidenPublishedCamera(FrameScene& scene, float scale) {
 void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   // Before any early return (see ReleaseFreecamIfOff).
   ReleaseFreecamIfOff();
+  // Shader verdict memos re-read each object's path once per frame (see
+  // ShaderVerdictMemo); OnSetShader's CAS classifier runs with the scene off.
+  g_shader_memo_epoch.fetch_add(1, std::memory_order_relaxed);
   if (!SceneEnabled()) {
     // F5 can disable native rendering between capture and publication.
     // Re-enabling must wait for a new draw rather than replay an old lens effect.
@@ -9590,9 +9629,29 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     if (s_last_pub.size() > 4096) {
       s_last_pub.clear();
     }
+    const auto tracked = [](const DrawItem& item) {
+      return item.ropa || item.char_family != 0 ||
+             (item.skinned && !item.bones.empty());
+    };
+    // Single-instance meshes only, like the character-rows fallback above:
+    // clones share the mesh key, so a tracked clone pair overwrote each
+    // other's entry within the frame and the caster-bank swap below served
+    // a clone its TWIN's same-frame capture (gap 0), drawing it at the
+    // twin's pose; the gap fill likewise re-published whichever instance
+    // stored last. A cloned mesh drops its entry so no single stale capture
+    // is refilled for it later.
+    std::unordered_map<uint32_t, uint32_t> pub_mesh_count;
+    for (const DrawItem& item : scene.items) {
+      if (tracked(item)) {
+        ++pub_mesh_count[item.mesh];
+      }
+    }
     for (DrawItem& item : scene.items) {
-      if (!(item.ropa || item.char_family != 0 ||
-            (item.skinned && !item.bones.empty()))) {
+      if (!tracked(item)) {
+        continue;
+      }
+      if (pub_mesh_count[item.mesh] > 1) {
+        s_last_pub.erase(item.mesh);
         continue;
       }
       PubTrack& t = s_last_pub[item.mesh];
