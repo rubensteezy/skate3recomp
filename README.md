@@ -200,6 +200,11 @@ cmake --build --preset relwithdebinfo --parallel
 
 For release packaging, use the `release` preset on Windows, the
 `linux-release` preset on Linux, or the `macos-release` preset on macOS.
+Build from the release tag so the version comes out right, then run
+`powershell -File tools/package_windows.ps1` on Windows or
+`tools/package_macos.sh` on macOS. Each writes the release zip to
+`out/release`; the macOS script wraps the build in an ad-hoc signed
+`skate3recomp.app`.
 
 The native renderer's HLSL sources live in `src/native/shaders` and are
 embedded into the build automatically. The matching Vulkan SPIR-V binaries are
