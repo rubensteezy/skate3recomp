@@ -39,6 +39,30 @@ That dumps the draws and a full guest-memory `.gsnap` into
 - **Next step:** take an F10 capture inside a park-editor warehouse to see what
   the interior draws look like and why the gate rejects them.
 
+### KI-4: Decals don't show on the player character
+
+- **Status:** investigating
+- **Area:** native renderer, character shading
+- **Tracking:** fix session `char-decals` (branch `fix-char-decals`)
+- **Symptom:** tattoos, bruising and dirt don't appear on the skater.
+- **Cause so far:** unknown. Not yet checked whether the emulated renderer (F5)
+  shows them.
+- **Next step:** work out from the game's own skin shaders how decals are
+  applied, then find which input the native character path
+  (`scene_char.hlsli`) drops.
+
+### KI-5: Enhanced shadows show artifacts
+
+- **Status:** investigating
+- **Area:** native renderer, shadows
+- **Tracking:** fix session `enhanced-shadows` (branch `fix-enhanced-shadows`)
+- **Symptom:** with Enhanced sun shadows on (Settings > Video), shadows mostly
+  appear as strange artifacts rather than an improvement over the stock
+  shadows.
+- **Cause so far:** unknown.
+- **Next step:** get a repro (location, settings, D3D12 or Vulkan), then use
+  the shadow cvars (static casters, PCSS, bias) to isolate which part causes it.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
