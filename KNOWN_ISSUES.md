@@ -9,7 +9,7 @@ the fix ships.
 
 - Each issue gets the next free `KI-N` id. Ids are never reused.
 - **Status** is one of `open`, `investigating`, `fix in review`, `fixed`
-  (merged and confirmed in-game), or `won't fix`.
+  (merged and confirmed in-game), `won't fix`, or `could not reproduce`.
 - **Tracking** lists the PRs, GitHub issues and sessions working on it.
 - Fixed issues move to [Resolved](#resolved) with the PR that fixed them. The
   repro and cause notes stay there for when a regression turns up.
@@ -58,30 +58,6 @@ That dumps the draws and a full guest-memory `.gsnap` into
   tattoo never reaches the texture. The texture-space composite pass may be
   suppressed or failing, its resolve may be lost, or the recomp may break a
   CPU-side step.
-
-### KI-7: Dev builds hang on the splash screen with the native renderer on at boot
-
-- **Status:** open
-- **Area:** native renderer, startup
-- **Tracking:** none yet
-- **Symptom:** a relwithdebinfo build of current `main` that boots with the
-  native renderer on gets past language select, then sits on the Skate 3
-  splash screen forever. Seen on D3D12 and Vulkan, in several worktrees, from
-  about 12:44 on 2026-10-12 (`v2.1.0.10-dev.gc8ba8ac` and later).
-- **Log:** the log has "rendering the loading screen NATIVELY", "pipelines
-  created", "shadow atlas created" and "gameplay (prewarm: 0 meshes ...)",
-  then only nrhi mem lines. "FMV planes published" never appears; a working
-  boot logs it within seconds.
-- **Workaround:** launch with `--skate3_native_render_scene=false`, then press
-  F5 in-game to switch to native.
-- **Who it affects:** the v2.1.0 release boots with the scene off ("renderer
-  registered (scene off)"), so release players may not hit this. v2.0.2 booted
-  with the scene on and worked. Either the default changed or a regression
-  landed between v2.0.2 and `main`.
-- **Next step:** bisect between v2.0.2 and `main`. The first suspects are
-  PR #17's native-scene commits: SDK cvar overrides restored on scene off,
-  freecam camera release and smoothing, and the portrait/menu "suppress mode"
-  overrides.
 
 ## Resolved
 
@@ -143,3 +119,24 @@ That dumps the draws and a full guest-memory `.gsnap` into
 - **Main suspect if revisited:** the map casts along the material sun (c6),
   which is about 43 degrees off the game's own stylized shadow axis and may
   disagree with the baked lightmaps.
+
+### KI-7: Dev builds hang on the splash screen with the native renderer on at boot
+
+- **Status:** could not reproduce on `main` (c152af0). No code change. Reopen
+  if it happens again, and save the log right away, because only the last 5
+  logs are kept.
+- **Report:** one dev run on 2026-10-12 (D3D12, KI-5's experimental build,
+  33cd9b7 plus an uncommitted shadow change). After language select the intro
+  video never started. Frames kept running but slowed, and the window was
+  closed after a minute. That log has since rotated away.
+- **Misread evidence:** the main-checkout logs that seemed to show the hang
+  (`skate3_014`..`018`, c8ba8ac) were shader-disassembly runs. They are killed
+  on purpose about 2 s after launch, which is why they stop with no mem lines
+  and no "Title terminated" line. `skate3_019`, from the same build with the
+  scene on from boot, booted normally. No Vulkan hang was ever seen.
+- **Checked:** 20 automated boots of `main` with the native renderer on from
+  boot, on D3D12 and Vulkan. That includes 8 with `--skate3_demo_path=true`,
+  which injects a pad A at language select. All of them reached the intro
+  video or gameplay. The user then booted it with a controller on both
+  backends and reached the menus. Notes: KI-7-splash-hang.md in the session
+  notes folder.
