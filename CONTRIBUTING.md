@@ -11,6 +11,10 @@ screenshots are fine.
 
 ## Reporting Bugs
 
+Known bugs are listed in [docs/bug-tracker.md](docs/bug-tracker.md); check
+there first. A pull request that fixes a tracked bug names its ID (for
+example `Fixes BT-09`) and updates its row in the same change.
+
 Open an issue with:
 
 - **What happened and how to reproduce it:** the mode or map, what you were
