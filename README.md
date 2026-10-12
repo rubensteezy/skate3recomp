@@ -89,6 +89,8 @@ Known issues:
 
 - Skate parks and park editing currently have some general visual parity / rendering issues
 
+See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the full list and the status of each fix.
+
 ## Installing DLC
 
 To use DLC, you must provide package files from your own legally obtained Xbox 360 DLC.
