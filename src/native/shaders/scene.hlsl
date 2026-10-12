@@ -55,6 +55,14 @@ cbuffer CH : register(b2) {
   float4 ch_rs;     // rgb = rim spec color, w = power
   float4 ch_rim;    // rgb = rim light color, w = key-spec fresnel power
   float4 ch_body_fade;  // zw = independent body opacity / override flag
+  // CAC decal layers (tattoo stamp / bruise / dirt; CaptureCacDecals):
+  // ch_dcu/ch_dcv.xyz = the custom-graphic affine rows of the second
+  // texcoord, ch_dcu.w = decal amount, ch_dcv.w = decal mode (0 off,
+  // 1 multiply @cg, 2 lerp @cg, 3 lerp @uv0; texture at t8),
+  // ch_dc2.x = decal2 amount (0 off; texture at t9, @uv0).
+  float4 ch_dcu;
+  float4 ch_dcv;
+  float4 ch_dc2;
 };
 Texture2D<float4> diffuse : register(t0);
 Texture2D<float4> lightmap : register(t1);

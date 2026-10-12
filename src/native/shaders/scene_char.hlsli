@@ -163,6 +163,31 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     if (ch_tintA.w > 0.0) {
       dlin *= ch_tintA.rgb;
     }
+    // CAC decal layers over the tinted base, before lighting (cacstamp /
+    // cac PS ucode; texels used raw). Layer 1 (t8): the custom-graphic
+    // tattoo stamp at the affine of the raw second texcoord (CLAMPED: the
+    // stamp is a single placement, wrap would tile it across the piece),
+    // multiplied on skin, lerped on cloth/shift; on the face it is a uv0
+    // lerp scaled by the amount. Layer 2 (t9): bruise/dirt lerp at uv0.
+    if (ch_dcv.w > 0.5) {
+      float4 dc;
+      if (ch_dcv.w > 2.5) {
+        dc = detail_map.Sample(smp, i.uv);
+      } else {
+        float3 u1 = float3(i.uv2, 1.0);
+        dc = detail_map.Sample(smp_clamp,
+                               float2(dot(u1, ch_dcu.xyz), dot(u1, ch_dcv.xyz)));
+      }
+      if (ch_dcv.w < 1.5) {
+        dlin *= lerp(float3(1.0, 1.0, 1.0), dc.rgb, dc.a);
+      } else {
+        dlin = lerp(dlin, dc.rgb, dc.a * ch_dcu.w);
+      }
+    }
+    if (ch_dc2.x > 0.0) {
+      float4 d2 = spec2_map.Sample(smp, i.uv);
+      dlin = lerp(dlin, d2.rgb, d2.a * ch_dc2.x);
+    }
     float3 irr = saturate(
         ch_sh[0].rgb + vn.x * ch_sh[1].rgb + vn.y * ch_sh[2].rgb +
         vn.z * ch_sh[3].rgb + (vn.x * vn.z) * ch_sh[4].rgb +

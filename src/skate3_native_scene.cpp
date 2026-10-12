@@ -834,6 +834,11 @@ REXCVAR_DEFINE_BOOL(skate3_native_render_scene_macro, true, "Skate 3",
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_decals, true, "Skate 3",
                     "Composite environment.decal art (graffiti/paint) over base diffuse")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(skate3_native_render_scene_char_decals, true, "Skate 3",
+                    "Composite the create-a-skater decal layers (tattoo stamps, "
+                    "bruises, dirt) over the skater's skin/face/cloth diffuse, "
+                    "as the game's cacstamp/cac pixel shaders do")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_transparents, true, "Skate 3",
                     "Draw environment.transparent items (mist/glass/fences) in the "
                     "alpha-blended sub-pass")
@@ -2151,6 +2156,7 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
   item.scroll_u = 0.0f;
   item.scroll_v = 0.0f;
   item.decal_art = 0;
+  item.char_decal2_tex = 0;
   item.hair = false;
   item.char_family = 0;
   item.hair_alpha_tex = 0;
@@ -2202,6 +2208,10 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
           slot = &item.macro_tex;
         } else if (std::memcmp(text, "decal", 6) == 0) {
           slot = &item.decal_art;
+        } else if (std::memcmp(text, "decal2", 7) == 0) {
+          // CAC skin/cloth second decal layer (i_decal2: bruises, dirt),
+          // see CaptureCacDecals.
+          slot = &item.char_decal2_tex;
         } else if (std::memcmp(text, "normal", 7) == 0) {
           // Exact match only. Consumed by the water branches (the flowing
           // ripple map / the ocean's first PCA component); other families
@@ -3602,6 +3612,159 @@ bool CaptureHallOfMeatState(uint8_t* base, DrawItem& item) {
   return true;
 }
 
+namespace {
+// CAC decal layers: tattoos (the custom-graphic stamp), bruises and dirt.
+// The fam-2 pixel shaders composite up to two extra textures over the
+// squared, tinted diffuse BEFORE lighting (ucode, gameplay register map;
+// the editor _nis compiles shift i_params / i_modulateColor1 one row up,
+// texture slots unchanged):
+//   cacstamp_skin:  base *= lerp(1, decal.rgb, decal.a)        decal  tf6 @ cg
+//                   base = lerp(base, d2.rgb, d2.a * c22.z)    decal2 tf7 @ uv0
+//   cac_face:       base = lerp(base, decal.rgb, decal.a * c22.z)  tf6 @ uv0
+//   cacstamp_cloth: base = lerp(base, decal.rgb, decal.a)      decal  tf5 @ cg
+//   (and _ropa)     base = lerp(base, d2.rgb, d2.a * c22.y)    decal2 tf6 @ uv0
+//   cac_cloth:      base = lerp(base, d2.rgb, d2.a * c22.y)    decal2 tf5 @ uv0
+//   (and _ropa)
+//   cacstamp_shift: base = lerp(base, decal.rgb, decal.a)      decal  tf5 @ cg
+// cg = the VS i_customGraphic affine of the SECOND texcoord:
+// (dot((uv2, 1), c190.xyz), dot((uv2, 1), c191.xyz)); the ropa VS keeps it
+// at c195/c196. The decal texels are used raw (not squared).
+enum CacDecalPs : uint8_t {
+  kCacDecalNone = 0,
+  kCacDecalSkin,
+  kCacDecalFace,
+  kCacDecalStampCloth,
+  kCacDecalCloth,
+  kCacDecalShift,
+};
+
+// Classify the bound CAC shader pair by its debug path leaf (both trackers:
+// the hook's pixel/vertex labels are swapped, see OnSetShader). Main-pass
+// compiles only (_default / _nis); the caster and unwrap variants sample no
+// decal and their banks fail the lighting gates anyway.
+CacDecalPs ClassifyCacDecalShader(uint8_t* base) {
+  for (const uint32_t obj : {g_cur_ps_obj.load(std::memory_order_relaxed),
+                             g_cur_vs_obj.load(std::memory_order_relaxed)}) {
+    if (obj < 0x10000) continue;
+    char text[97] = {};
+    if (!GuestTryCopy(text, base + obj + 0x54, 96)) continue;
+    const char* leaf = std::strrchr(text, '\\');
+    leaf = leaf ? leaf + 1 : text;
+    if (std::strstr(leaf, "_default") == nullptr &&
+        std::strstr(leaf, "_nis") == nullptr) {
+      continue;
+    }
+    const auto starts = [&](const char* p) {
+      return std::strncmp(leaf, p, std::strlen(p)) == 0;
+    };
+    if (starts("cacstamp_skin_")) return kCacDecalSkin;
+    if (starts("cac_face_")) return kCacDecalFace;
+    if (starts("cacstamp_cloth_")) return kCacDecalStampCloth;
+    if (starts("cac_cloth_")) return kCacDecalCloth;
+    if (starts("cacstamp_shift_")) return kCacDecalShift;
+  }
+  return kCacDecalNone;
+}
+
+// Fill the decal rows of a fam-2 capture block `d` (kCharRowFloats):
+//   [kCharDecalRows + 0..3]  ch_dcu: xyz = cg u row, w = decal amount
+//   [kCharDecalRows + 4..7]  ch_dcv: xyz = cg v row, w = decal mode
+//                            (0 off, 1 multiply @cg, 2 lerp @cg, 3 lerp @uv0)
+//   [kCharDecalRows + 8]     ch_dc2.x: decal2 amount (0 = off)
+//   [kCharDecalFetch + 0..5 / 6..11]  draw-time fetch words of the decal /
+//                            decal2 slots (bit-cast; all 0 = serve the
+//                            material channel instead)
+// The fetch words are the textures the game's draw actually samples; they
+// are adopted only when this draw's diffuse slot (tf3) is the item's own
+// diffuse, which proves the device state belongs to this draw.
+void CaptureCacDecals(uint8_t* base, const DrawItem& item, uint32_t plus,
+                      float* d) {
+  const CacDecalPs ps = ClassifyCacDecalShader(base);
+  if (ps == kCacDecalNone) return;
+  const uint32_t ps_bank = g_ps_bank.load(std::memory_order_relaxed);
+  const uint32_t vs_bank = g_vs_bank.load(std::memory_order_relaxed);
+  // i_params (c22, editor c23): .z = skin/face layer amount, .y = cloth.
+  const float amt_z = LoadGuestF32(base, ps_bank + ((22u + plus) * 4 + 2) * 4);
+  const float amt_y = LoadGuestF32(base, ps_bank + ((22u + plus) * 4 + 1) * 4);
+  const auto amount = [](float f) {
+    return f > 0.0f && f < 16.0f ? std::min(f, 1.0f) : 0.0f;
+  };
+  float mode = 0.0f, decal_amt = 0.0f, decal2_amt = 0.0f;
+  uint32_t decal_slot = 0, decal2_slot = 0;
+  switch (ps) {
+    case kCacDecalSkin:
+      mode = 1.0f; decal_amt = 1.0f; decal_slot = 6;
+      decal2_amt = amount(amt_z); decal2_slot = 7;
+      break;
+    case kCacDecalFace:
+      mode = 3.0f; decal_amt = amount(amt_z); decal_slot = 6;
+      break;
+    case kCacDecalStampCloth:
+      mode = 2.0f; decal_amt = 1.0f; decal_slot = 5;
+      decal2_amt = amount(amt_y); decal2_slot = 6;
+      break;
+    case kCacDecalCloth:
+      decal2_amt = amount(amt_y); decal2_slot = 5;
+      break;
+    case kCacDecalShift:
+      mode = 2.0f; decal_amt = 1.0f; decal_slot = 5;
+      break;
+    default:
+      return;
+  }
+  if (mode == 1.0f || mode == 2.0f) {
+    // The custom-graphic affine; an unreadable / implausible bank drops the
+    // stamp layer rather than smearing one texel across the piece.
+    const uint32_t cg_r = item.ropa ? 195u : 190u;
+    float cg[8];
+    bool cg_ok = vs_bank != 0;
+    for (uint32_t r = 0; r < 2 && cg_ok; ++r) {
+      for (uint32_t c = 0; c < 3 && cg_ok; ++c) {
+        const float f = LoadGuestF32(base, vs_bank + ((cg_r + r) * 4 + c) * 4);
+        cg_ok = f > -1e4f && f < 1e4f;
+        cg[r * 4 + c] = f;
+      }
+    }
+    if (!cg_ok) {
+      mode = 0.0f;
+    } else {
+      for (uint32_t c = 0; c < 3; ++c) {
+        d[kCharDecalRows + c] = cg[c];
+        d[kCharDecalRows + 4 + c] = cg[4 + c];
+      }
+    }
+  }
+  if (decal_amt == 0.0f) mode = 0.0f;
+  if (mode == 0.0f && decal2_amt == 0.0f) return;
+  d[kCharDecalRows + 3] = mode != 0.0f ? decal_amt : 0.0f;
+  d[kCharDecalRows + 7] = mode;
+  d[kCharDecalRows + 8] = decal2_amt;
+  // Draw-time fetch words, proven to be this draw's by the tf3 diffuse.
+  const uint32_t dev = g_device.load(std::memory_order_relaxed);
+  uint32_t diff_w1 = 0;
+  uint32_t fetch[8][6];
+  if (dev == 0 || item.diffuse_tex == 0 ||
+      !GuestTryLoadU32(base, item.diffuse_tex + 8 * 4, &diff_w1) ||
+      !GuestTryCopy(fetch, base + dev + 0x480, sizeof(fetch))) {
+    return;
+  }
+  for (auto& slot : fetch) {
+    for (uint32_t& w : slot) w = BSwap32(w);
+  }
+  const auto phys_base = [](uint32_t w1) { return w1 & 0x1FFFF000u; };
+  if ((fetch[3][0] & 3u) != 2u || phys_base(fetch[3][1]) != phys_base(diff_w1)) {
+    return;
+  }
+  const auto store = [&](uint32_t slot, uint32_t at) {
+    if (slot != 0 && (fetch[slot][0] & 3u) == 2u) {
+      std::memcpy(d + at, fetch[slot], sizeof(fetch[slot]));
+    }
+  };
+  if (mode != 0.0f) store(decal_slot, kCharDecalFetch);
+  if (decal2_amt != 0.0f) store(decal2_slot, kCharDecalFetch + 6);
+}
+}  // namespace
+
 void CaptureCharLighting(uint8_t* base, DrawItem& item) {
   if (CaptureHallOfMeatState(base, item)) return;
   if (item.char_family == 0) {
@@ -3619,7 +3782,7 @@ void CaptureCharLighting(uint8_t* base, DrawItem& item) {
   // later draw with the same buffers (the caster-pass bank is stale; its
   // shadowPS touches no PS constants), and a failed refresh must not wipe
   // rows a previous successful capture staged.
-  float local[72];
+  float local[kCharRowFloats];
   float* d = local;
   std::memset(local, 0, sizeof(local));
   uint8_t fam = item.char_family;
@@ -3734,6 +3897,8 @@ void CaptureCharLighting(uint8_t* base, DrawItem& item) {
         d[12 * 4 + 2] = tint[2];
         d[12 * 4 + 3] = 1.0f;
       }
+      // Tattoo / bruise / dirt layers (see CaptureCacDecals).
+      CaptureCacDecals(base, item, plus, d);
     }
     // Material multiplier m_params[0].y (defaultcharacter c5.y / cacstamp
     // c14.y): the PS multiplies the lit color by it before the tone chain
