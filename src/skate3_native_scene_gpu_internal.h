@@ -1027,6 +1027,13 @@ struct RendererState {
     // site adopts the smaller binding once the downgrade persists past
     // skate3_native_render_scene_detail_hold frames.
     uint64_t downgrade_since = 0;
+    // Signature of the piece that adopted words_key (see PieceSignature in
+    // RenderScene). Sites are keyed by mesh ADDRESS, and the CAS editor
+    // rebuilds the skater on every edit with addresses recycled across
+    // different pieces; a site whose piece changed must not hold or sticky-
+    // serve the previous occupant's art (skin on the hair, a composite mask
+    // layer on the arms).
+    uint64_t piece = 0;
   };
   std::unordered_map<uint64_t, TexStickySite> tex_sticky;
   // First frame a texture object resolved white-with-heal-in-flight:

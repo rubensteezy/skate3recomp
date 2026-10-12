@@ -8977,8 +8977,40 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         return t;
       }
       const uint64_t skey = (uint64_t(item.mesh) << 3) | slot;
+      // Piece signature: the shading class plus the geometry's total index
+      // count. A world mesh's material-detail demote keeps its geometry
+      // (same signature: the hold below still applies); a recycled mesh
+      // address now carrying a different piece does not.
+      uint64_t piece = (uint64_t(item.char_family) << 1) |
+                       (uint64_t(item.hair) << 4) | (uint64_t(item.char_alpha) << 5) |
+                       (uint64_t(item.ropa) << 6) | 1u;
+      {
+        uint64_t indices = 0;
+        for (const DrawEntry& d : item.draws) {
+          indices += d.index_count;
+        }
+        // No geometry yet (draws not populated this frame): the piece is
+        // unknown, neither compared nor stamped, so a transiently empty
+        // item never cancels its own legitimate hold.
+        piece = indices != 0 ? (piece | (indices << 8)) : 0;
+      }
+      const auto drop_foreign_site = [&](RendererState::TexStickySite& site) {
+        if (piece == 0 || site.piece == 0 || site.piece == piece ||
+            site.words_key == 0) {
+          return;
+        }
+        static std::atomic<uint32_t> s_foreign_logs{0};
+        if (s_foreign_logs.fetch_add(1, std::memory_order_relaxed) < 24) {
+          REXLOG_INFO(
+              "native-scene: texture hold dropped: mesh={:08X} slot={} now "
+              "carries a different piece (sig {:X} -> {:X}, fam {})",
+              item.mesh, slot, site.piece, piece, item.char_family);
+        }
+        site = RendererState::TexStickySite{};
+      };
       if (t != &g_r.white) {
         RendererState::TexStickySite& site = g_r.tex_sticky[skey];
+        drop_foreign_site(site);
         // Material-detail downgrade hold: the game's streaming demotes a
         // nearby mesh to its UN (undetailed) material for a fraction of a
         // second and back, the visible flash to completely different/
@@ -9043,6 +9075,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         site.words_key = cur_key;
         site.area = cur_area;
         site.downgrade_since = 0;
+        if (piece != 0) {
+          site.piece = piece;
+        }
         if (!g_r.tex_pending_first.empty()) {
           g_r.tex_pending_first.erase(tex_ptr);
         }
@@ -9053,6 +9088,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // previous art from the store, the console's own mip-transition
         // look instead of a white flash.
         const auto sit = g_r.tex_sticky.find(skey);
+        if (sit != g_r.tex_sticky.end()) {
+          drop_foreign_site(sit->second);
+        }
         if (sit != g_r.tex_sticky.end() && sit->second.words_key != 0) {
           const auto old = g_r.tex_store.find(sit->second.words_key);
           if (old != g_r.tex_store.end() && old->second.valid) {
