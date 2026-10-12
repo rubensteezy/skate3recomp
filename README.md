@@ -206,8 +206,8 @@ after editing the HLSL.
 
 These instructions target Ubuntu 24.04 LTS on x86_64. Other distributions need
 the same toolchain shape: CMake, Ninja, Clang 20 or newer, Vulkan development
-headers, GTK 3 development headers, and SDL-compatible audio/input development
-packages.
+headers, GTK 3 development headers, X11 and Wayland development headers for the
+SDL3 window layer, and SDL-compatible audio/input development packages.
 
 ReXGlue requires Clang. Clang 20 is recommended on Ubuntu because it matches the
 Linux toolchain used by the rexglue SDK CI and avoids Ubuntu 24.04's
@@ -224,7 +224,8 @@ sudo ./llvm.sh 20
 sudo apt install -y \
   git cmake ninja-build build-essential pkg-config p7zip-full \
   clang-20 lld-20 \
-  libgtk-3-dev libx11-xcb-dev \
+  libgtk-3-dev libx11-xcb-dev libxss-dev \
+  libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libdecor-0-dev \
   libvulkan-dev vulkan-tools mesa-vulkan-drivers \
   libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev
 ```
@@ -265,12 +266,12 @@ out/build/linux-release/librexgpu-xenos.so
 ## macOS Build (Apple Silicon)
 
 macOS builds use Homebrew LLVM - the `macos-*` presets expect the toolchain at
-`/opt/homebrew/opt/llvm`. Vulkan is provided by MoltenVK; the build copies the
-library next to the executable and writes a `MoltenVK_icd.json`, looking in
-`$VULKAN_SDK/lib`, `/opt/homebrew/lib`, and `/usr/local/lib`.
+`/opt/homebrew/opt/llvm`. Vulkan is provided by MoltenVK: the build compiles the
+Vulkan loader and MoltenVK revisions the SDK pins as submodules, and stages them
+with the MoltenVK ICD manifest in a `vulkan` folder next to the executable.
 
 ```sh
-brew install llvm cmake ninja molten-vk
+brew install llvm cmake ninja vulkan-loader molten-vk
 ```
 
 Configure, generate, reconfigure, and build a release:
@@ -283,8 +284,8 @@ cmake --build --preset macos-release --parallel
 ```
 
 The release artifacts are `out/build/macos-release/skate3`,
-`librexruntime.dylib` and `librexgpu-xenos.dylib`, plus the MoltenVK library and
-ICD manifest beside them.
+`librexruntime.dylib` and `librexgpu-xenos.dylib`, plus the `vulkan` folder
+beside them.
 
 ## Running a Development Build
 
@@ -326,10 +327,11 @@ git submodule sync --recursive
 git submodule update --init --recursive --jobs "$(nproc 2>/dev/null || echo 4)"
 ```
 
-The fork is based on rexglue's 0.8.0 release line and contains the Skate 3
-runtime, codegen, input, timing, the Direct3D 12 and Vulkan backends used by
-the native renderer, the settings overlay, and the Linux and macOS fixes
-needed by this project.
+The fork tracks the upstream rexglue releases (currently 0.10.0) and adds the
+Skate 3 runtime, codegen, input, timing, the native renderer's Direct3D 12 and
+Vulkan backends, the settings overlay, and the Linux and macOS fixes needed by
+this project. GPU emulation is built as a separate library (`rexgpu-xenos`)
+that ships next to the executable and the runtime library.
 
 ## Credits
 

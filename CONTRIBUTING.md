@@ -85,6 +85,15 @@ submodule in this repository with a separate commit (`sdk: bump for ...`).
 A pull request here must never pin an SDK commit that isn't on the SDK fork's
 `skate3-sdk-clean` branch.
 
+The SDK fork's CI checks formatting on every push and pull request with the
+clang-format version pinned in `scripts/requirements-dev.txt` (20.1.8). Format
+your SDK changes with that exact version before pushing; other versions format
+some constructs differently.
+
+The fork follows upstream rexglue releases by merging them into
+`skate3-sdk-clean` (add `https://github.com/rexglue/rexglue-sdk` as a remote and
+merge its release tag), so the SDK keeps a shared history with upstream.
+
 ### Commit Messages
 
 Start the subject with the area it touches, in lower case, followed by a short
