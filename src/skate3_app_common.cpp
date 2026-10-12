@@ -817,9 +817,13 @@ void Skate3BaseApp::OnPostSetup() {
       }
     });
   });
+  // MAX QUALITY (F12 photo mode) is suspended around the save so its maxed
+  // values never reach settings.toml (see WithMaxQualitySuspended).
   skate3::options_menu::SetSaveSettingsCallback([this]() {
-    app_context().CallInUIThreadDeferred(
-        [this]() { rex::ui::SaveSimpleSettingsConfig(user_settings_path_); });
+    app_context().CallInUIThreadDeferred([this]() {
+      skate3::WithMaxQualitySuspended(
+          [this]() { rex::ui::SaveSimpleSettingsConfig(user_settings_path_); });
+    });
   });
   skate3::options_menu::SetRestartCallback([this]() { RestartGame(); });
   skate3::options_menu::Install();
@@ -862,6 +866,9 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     } else {
       ApplySettingsCursorMode();
       skate3::native_scene::SetSettingsMenuBlur(true);
+      // Before Show: the overlay loads its rows from the live cvars and
+      // saves them on every change (see SuspendMaxQuality).
+      skate3::SuspendMaxQuality();
       simple_settings_dialog_->Show();
     }
     return;
@@ -907,6 +914,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
   auto close_settings = [this]() {
     skate3::native_scene::SetSettingsMenuBlur(false);
     ApplyGameplayCursorMode();
+    skate3::ResumeMaxQuality();
   };
   auto close_game = [this]() {
 #if REX_PLATFORM_MAC || REX_PLATFORM_LINUX
@@ -956,6 +964,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
           std::move(poll_gamepad));
   ApplySettingsCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(true);
+  skate3::SuspendMaxQuality();
   simple_settings_dialog_->Show();
 }
 

@@ -6,6 +6,8 @@
 // visual regressions in-game without rebuilds. Includes the max-quality
 // photo-mode toggle for showcase/promo recording.
 
+#include <functional>
+
 #include <rex/ui/imgui_dialog.h>
 
 namespace skate3 {
@@ -14,6 +16,15 @@ namespace skate3 {
 // toggles the max-quality photo mode every N native-scene frames. Called
 // once per frame from the scene renderer (works without the F12 dialog).
 void MaxQualityAutoCycle(uint64_t frame_number);
+
+// MAX QUALITY is session-only, but the knobs it maxes include persisted user
+// settings that the SDK's settings save writes from the live cvars. Settings
+// saves run inside WithMaxQualitySuspended (switch off, run fn, switch back
+// on; a no-op wrapper when the mode is off), and the settings overlay, which
+// saves on every row change, suspends the mode while it is open. UI thread.
+void WithMaxQualitySuspended(const std::function<void()>& fn);
+void SuspendMaxQuality();
+void ResumeMaxQuality();
 
 class NativeDebugDialog final : public rex::ui::ImGuiDialog {
  public:
