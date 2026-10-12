@@ -148,9 +148,14 @@ if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
     endif()
 endif()
 
-set(SKATE3_PATCHED_DEFAULT_XEX_LINE "")
-set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE "")
-set(SKATE3_CODEGEN_ARGS "")
+# Codegen inputs. With title update codegen these point at the staged TU3
+# copies; rexglue applies the sibling .xexp patch when it loads each module.
+set(SKATE3_CODEGEN_DEFAULT_XEX "${SKATE3_GAME_DATA_ROOT_CONFIG}/default.xex")
+set(SKATE3_CODEGEN_EAWEBKIT_XEX "${SKATE3_GAME_DATA_ROOT_CONFIG}/data/webkit/EAWebkit.xex")
+# generate-all is an explicit regenerate step. rexglue's input stamp does not
+# cover the rexglue build itself, so a codegen fix would otherwise be skipped;
+# unchanged outputs are still left untouched.
+set(SKATE3_CODEGEN_ARGS "--ignore-stamp")
 set(SKATE3_FUNCTION_CONFIG_INCLUDES
     "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -254,14 +259,8 @@ if(SKATE3_HAS_TITLE_UPDATE_CODEGEN)
             "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEXP}"
     )
 
-    file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_DEFAULT_XEX}"
-        SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG)
-    file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX}"
-        SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG)
-    set(SKATE3_PATCHED_DEFAULT_XEX_LINE
-        "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
-    set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
-        "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
+    file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_DEFAULT_XEX}" SKATE3_CODEGEN_DEFAULT_XEX)
+    file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX}" SKATE3_CODEGEN_EAWEBKIT_XEX)
     set(SKATE3_FUNCTION_CONFIG_INCLUDES
         "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
     if(SKATE3_TITLE_UPDATE_FROM_GAME_ROOT)
@@ -419,7 +418,16 @@ else()
 endif()
 
 target_link_libraries(skate3 PRIVATE rex::runtime)
-rexglue_configure_target(skate3)
+rexglue_configure_target(skate3 GPU_PLUGINS xenos)
+
+if(UNIX AND NOT APPLE)
+    # The ISO and title update installers use GTK file choosers; the SDK no
+    # longer links GTK now that its windowing is SDL3.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+    target_include_directories(skate3 PRIVATE ${GTK3_INCLUDE_DIRS})
+    target_link_libraries(skate3 PRIVATE ${GTK3_LIBRARIES})
+endif()
 
 if(APPLE)
     target_link_options(skate3 PRIVATE -Wl,-stack_size,0x4000000)

@@ -303,7 +303,6 @@ void DisableActiveDebugDiagnostics() {
   constexpr std::string_view kFalseFlags[] = {
       "perf_draw_fingerprints",
       "perf_keep_heavyweight_draw_diagnostics",
-      "trace_gpu_stream",
   };
   for (std::string_view flag : kFalseFlags) {
     rex::cvar::SetFlagByName(std::string(flag), "false");
