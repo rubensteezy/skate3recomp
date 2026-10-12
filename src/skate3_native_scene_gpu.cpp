@@ -71,6 +71,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_boot_native);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_cas_yield);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_char_shadow_exact);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_decals);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_char_decals);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_dynamic_items);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_dynobj_v2);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_entity_fade);
@@ -905,7 +906,12 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
     // Exception: hair meshes, their second texcoord is the strand-alpha
     // UV, passed RAW by the hair VS (o0.zw = uv, float2), and the ocean,
     // whose VS passes the lightmap UV raw (Out.UV.zw = In.LM, no abs).
-    if (item.char_family < 4 && item.water_ocean == 0) {
+    // Likewise the CAC pieces (fams 1/2 bar the lenses): the cacstamp VSes
+    // feed the raw second texcoord into the custom-graphic (tattoo stamp)
+    // affine, dot((uv2, 1), c190/c191).
+    const bool raw_uv2 =
+        (item.char_family == 1 || item.char_family == 2) && !item.char_alpha;
+    if (item.char_family < 4 && item.water_ocean == 0 && !raw_uv2) {
       dst[v * 14 + 5] = std::fabs(dst[v * 14 + 5]);
       dst[v * 14 + 6] = std::fabs(dst[v * 14 + 6]);
     }
@@ -4656,6 +4662,12 @@ void WarmItemResources(const NativeGuestOutputRenderContext& context, uint8_t* b
   if (item.char_family >= 4 && item.char_family <= 5) {
     warm_texture(item.hair_alpha_tex);
   }
+  if (item.char_family == 2 &&
+      REXCVAR_GET(skate3_native_render_scene_char_decals)) {
+    // CAC decal-layer channel fallbacks (t8/t9; see CaptureCacDecals).
+    warm_texture(item.decal_art);
+    warm_texture(item.char_decal2_tex);
+  }
   if ((item.env_family != 0 && item.env_family != 10) || item.unlit ||
       item.dynobj != 0) {
     // unlit = sky: spec_tex is the 1D sun gradient. Decal fams (3/4) and
@@ -4892,6 +4904,11 @@ void ProcessPrewarmEntry(uint8_t* base, const PrewarmEntry& e) {
   }
   if (item.char_family >= 4 && item.char_family <= 5) {
     stage_texture(item.hair_alpha_tex);
+  }
+  if (item.char_family == 2 &&
+      REXCVAR_GET(skate3_native_render_scene_char_decals)) {
+    stage_texture(item.decal_art);
+    stage_texture(item.char_decal2_tex);
   }
   if ((item.env_family != 0 && item.env_family != 10) || item.unlit ||
       item.dynobj != 0) {
@@ -9318,7 +9335,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // for these six draw-time rows. Clear its full declared footprint
       // (including ch_body_fade, which must stay off for HoM draws).
       float* dst = reinterpret_cast<float*>(g_r.bone_ring_cpu + bone_region + offset);
-      std::fill_n(dst, 76, 0.0f);
+      std::fill_n(dst, kCharUploadFloats, 0.0f);
       std::memcpy(dst, item.hom_rows, sizeof(item.hom_rows));
       g_r.bone_ring_offset = offset + 512u;
       cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region + offset);
@@ -9332,14 +9349,55 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     const bool character_lighting = debug_mode == 0 && !item.hall_of_meat &&
                                     item.char_family != 0 &&
                                     item.char_rows[14 * 4 + 1] > 0.0f;
+    // CAC decal layers (tattoo stamp / bruise / dirt; see CaptureCacDecals):
+    // the textures the draw sampled (fetch words captured with the rows),
+    // else the material's decal / decal2 channels. Bound on the t8/t9 pair
+    // (character draws use neither slot otherwise); a layer whose texture
+    // has not decoded is switched OFF in the uploaded rows: the white
+    // fallback would paint a lerp layer solid white.
+    const GuestTexture* char_decal = nullptr;
+    const GuestTexture* char_decal2 = nullptr;
+    if (character_lighting && item.char_family == 2 &&
+        REXCVAR_GET(skate3_native_render_scene_char_decals)) {
+      const auto layer = [&](uint32_t fetch_at, uint32_t chan_tex,
+                             uint64_t site, uint32_t slot) -> const GuestTexture* {
+        uint32_t words[6];
+        std::memcpy(words, item.char_rows + fetch_at, sizeof(words));
+        const GuestTexture* t =
+            words[1] != 0 ? resolve_fetch_words(words, site, item.retained)
+                          : nullptr;
+        if (t == nullptr && chan_tex != 0) {
+          t = resolve_texture(chan_tex, slot);
+        }
+        return t != nullptr && t != &g_r.white && t->valid && t->srv_mips != 0
+                   ? t
+                   : nullptr;
+      };
+      // Sites: bit 63 keeps them apart from the diffuse/decal-art ad sites
+      // (mesh << 1 | slot).
+      const uint64_t site = (1ull << 63) | (uint64_t(item.mesh) << 1);
+      if (item.char_rows[kCharDecalRows + 7] > 0.0f) {
+        char_decal = layer(kCharDecalFetch, item.decal_art, site, 4);
+      }
+      if (item.char_rows[kCharDecalRows + 8] > 0.0f) {
+        char_decal2 = layer(kCharDecalFetch + 6, item.char_decal2_tex,
+                            site | 1u, 7);
+      }
+    }
     if (character_lighting || body_fade.eligible) {
       const uint32_t offset = fade_uniform != nullptr
           ? fade_uniform->char_offset : (g_r.bone_ring_offset + 255u) & ~255u;
       if (offset + 512u > RendererState::kBoneRegionSize) return;
       float* rows = reinterpret_cast<float*>(g_r.bone_ring_cpu + bone_region + offset);
-      std::fill_n(rows, 76, 0.0f);
+      std::fill_n(rows, kCharUploadFloats, 0.0f);
       if (character_lighting) {
-        std::memcpy(rows, item.char_rows, sizeof(item.char_rows));
+        std::memcpy(rows, item.char_rows, kCharUploadFloats * sizeof(float));
+        if (char_decal == nullptr) {
+          rows[kCharDecalRows + 7] = 0.0f;
+        }
+        if (char_decal2 == nullptr) {
+          rows[kCharDecalRows + 8] = 0.0f;
+        }
         constants[39] = item.char_rows[14 * 4 + 1];
         g_char_drawn.fetch_add(1, std::memory_order_relaxed);
       }
@@ -9947,7 +10005,13 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                         shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
     // World-shading v2 material pair (t8 detail + t9 decal spec); the exact
     // ocean rides the same pair (t8 = second PCA component, t9 = overlay).
-    if (v2_flags != 0 || ocean_n2 || ocean_ov) {
+    if (char_decal != nullptr || char_decal2 != nullptr) {
+      // Character draws carry no v2/ocean maps: the pair is theirs.
+      v2_detail = char_decal;
+      v2_spec2 = char_decal2;
+    }
+    if (v2_flags != 0 || ocean_n2 || ocean_ov || char_decal != nullptr ||
+        char_decal2 != nullptr) {
       // Three-entry bind: re-pairing only t8/t9 would reset the t10 static
       // sun-shadow map to the backend fallback.
       nrhi::TextureView* t8_views[3] = {

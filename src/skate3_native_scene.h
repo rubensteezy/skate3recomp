@@ -15,6 +15,14 @@
 
 namespace skate3::native_scene {
 
+// DrawItem::char_rows layout (floats). [0, kCharUploadFloats) is the b2
+// block the scene PS reads (cbuffer CH); the fetch words after it are
+// CPU-only.
+constexpr uint32_t kCharDecalRows = 19 * 4;      // ch_dcu, ch_dcv, ch_dc2
+constexpr uint32_t kCharUploadFloats = 22 * 4;
+constexpr uint32_t kCharDecalFetch = kCharUploadFloats;  // 2 x 6 words
+constexpr uint32_t kCharRowFloats = kCharDecalFetch + 12;
+
 struct DrawEntry {
   uint32_t prim;
   uint32_t base_vertex;
@@ -115,8 +123,16 @@ struct DrawItem {
   // 18 float4 rows consumed by the scene PS character branch (cbuffer CH,
   // b2). rows[14].y = family, > 0 only when the capture validated; items
   // without it fall back to the legacy empirical character shading.
+  // Past the lighting block: row 18 = ch_body_fade (written at draw time),
+  // rows 19..21 = the CAC decal layers (ch_dcu / ch_dcv / ch_dc2, see
+  // CaptureCacDecals), then the two layers' draw-time fetch words
+  // (bit-cast, CPU-only: never uploaded). Riding char_rows carries the
+  // decal state through every cross-frame row cache with the lighting.
   uint8_t char_family = 0;
-  float char_rows[72] = {};
+  float char_rows[kCharRowFloats] = {};
+  // `decal2` material channel (CAC skin/cloth: bruise/dirt layer), the
+  // fallback when the draw-time fetch words did not validate.
+  uint32_t char_decal2_tex = 0;
   // defaulthom_defaultPS: the Hall of Meat bones are an unlit overlay,
   // with per-draw injury tint/fresnel and fog rather than CAC lighting.
   // This is a draw-time shader classification; an ordinary body mesh
