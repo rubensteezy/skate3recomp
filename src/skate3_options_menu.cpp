@@ -12,6 +12,7 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 REXCVAR_DEFINE_BOOL(skate3_options_menu_entry, true, "Skate 3",
                     "Add a PC Settings row to the game's Options menu that opens the "
