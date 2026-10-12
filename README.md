@@ -26,6 +26,11 @@ This is a continuation of [mchughalex/skate3recomp](https://github.com/mchughale
 
 Changes in this fork so far:
 
+- The PC settings are now also in the game's own Options menu, on Display, Graphics, View, PC Controls and System pages drawn by the game's UI. Settings that need a restart are staged and applied through the game's own Restart Required prompt.
+- Fixed streamed textures briefly showing solid colors or another texture's content while they load in.
+- Fixed Edit Skater showing red or patterned arms, see-through eyes and the wrong hair for a few seconds after skin-tone and other edits.
+- Create-a-skater hair now matches the original shading: the strand highlight is restored, and the hair darkens in shadow along with the face and body.
+- Moved to rexglue SDK 0.10.0. GPU emulation now ships as a separate library next to the executable.
 - Fixed a Direct3D 12 crash after extended play: the shader-visible descriptor heap leaked binding-table slots during world streaming until it ran out, which led to device removal (fixed in the SDK fork).
 - Fixed static shadows rendering pure black on frames with no dynamic shadow caster, such as in-game cutscene cameras.
 - Merged community fixes that were never reviewed upstream: Hall of Meat injury highlights and lens effects, seamless character fades (returning to a marker no longer fades the skater in as separate patches with visible seams where body pieces overlap), the shirt vanishing or lagging while its cloth sim is active, custom-map (SkateIT/ArenaBuilder) geometry and texture coordinates, and cross-platform drone/freecam input.
@@ -41,11 +46,11 @@ Notes:
 - The Windows version is the most tested, followed by Linux, and then macOS.
 - On some hardware configurations, you may have a better experience running the Windows version through a translation layer like Proton rather than the native Linux build itself.
 - The macOS ARM build is experimental and more prone to issues.
-- This fork does not publish prebuilt releases yet. The steps below use the last release from the [original repository's releases page](https://github.com/mchughalex/skate3recomp/releases), which works but does not include this fork's fixes; to get them, [build from source](#building-from-source).
+- Releases are published on this fork's [releases page](https://github.com/rubensteezy/skate3recomp/releases). There is no Linux release from this fork yet: [build from source](#building-from-source), or use the last Linux release (v2.0.2) on the [original repository's releases page](https://github.com/mchughalex/skate3recomp/releases), which works but does not include this fork's fixes.
 
 ### Windows
 
-1. Download the latest release Skate3Recomp-Windows.zip from the releases page.
+1. Download the latest release Skate3Recomp-Windows.zip from the [releases page](https://github.com/rubensteezy/skate3recomp/releases).
 2. Extract it anywhere you like, to a folder you control.
 3. Run skate3.exe.
 4. Click "Select ISO" to select your legally obtained copy of Skate 3.
@@ -54,7 +59,7 @@ Notes:
 
 ### Linux
 
-1. Download the latest release Skate3Recomp-Linux.zip from the releases page.
+1. Download Skate3Recomp-Linux.zip from the [original repository's releases page](https://github.com/mchughalex/skate3recomp/releases) (v2.0.2), or build from source.
 2. Extract it anywhere you like, to a folder you control.
 3. Run skate3.
 4. Click "Select ISO" to select your legally obtained copy of Skate 3.
@@ -63,7 +68,7 @@ Notes:
 
 ### macOS (ARM / Experimental)
 
-1. Download the latest release Skate3Recomp-macOS.zip from the releases page.
+1. Download the latest release Skate3Recomp-macOS.zip from the [releases page](https://github.com/rubensteezy/skate3recomp/releases).
 2. Extract it anywhere you like, to a folder you control.
 3. Run the game by opening the skate3recomp app. Game files, saves and settings are kept in the folder containing the app, so keep it in a folder you control rather than in Downloads or Applications.
 4. The first time, right-click the app and choose Open, or approve it under System Settings > Privacy & Security, before macOS will allow it to run.
