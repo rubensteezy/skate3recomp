@@ -46,6 +46,7 @@ Notes:
 - The Windows version is the most tested, followed by Linux, and then macOS.
 - On some hardware configurations, you may have a better experience running the Windows version through a translation layer like Proton rather than the native Linux build itself.
 - The macOS ARM build is experimental and more prone to issues.
+- The Linux release is built on Ubuntu 24.04 and needs glibc 2.38 or newer. On older distributions, [build from source](#building-from-source).
 - Releases are published on this fork's [releases page](https://github.com/rubensteezy/skate3recomp/releases).
 
 ### Windows
