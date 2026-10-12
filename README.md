@@ -28,7 +28,7 @@ Changes in this fork so far:
 
 - Fixed a Direct3D 12 crash after extended play: the shader-visible descriptor heap leaked binding-table slots during world streaming until it ran out, which led to device removal (fixed in the SDK fork).
 - Fixed static shadows rendering pure black on frames with no dynamic shadow caster, such as in-game cutscene cameras.
-- Merged community fixes that were never reviewed upstream: Hall of Meat injury highlights and lens effects, the shirt vanishing or lagging while its cloth sim is active, custom-map (SkateIT/ArenaBuilder) geometry and texture coordinates, and cross-platform drone/freecam input.
+- Merged community fixes that were never reviewed upstream: Hall of Meat injury highlights and lens effects, seamless character fades (returning to a marker no longer fades the skater in as separate patches with visible seams where body pieces overlap), the shirt vanishing or lagging while its cloth sim is active, custom-map (SkateIT/ArenaBuilder) geometry and texture coordinates, and cross-platform drone/freecam input.
 - Fresh recursive clones build again: the SDK's imgui submodule pointed at commits that were never published, and now fetches from a published fork.
 - Building from source can use the title update patches already present in an installed game folder, so the separate title update package is no longer required.
 
