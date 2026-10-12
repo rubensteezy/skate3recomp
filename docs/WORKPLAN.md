@@ -1,0 +1,198 @@
+# Workplan
+
+Written 2026-10-11 against `main` at `44bea37`. This is a snapshot. The review
+below was done by reading the merged diffs (`gh pr diff`), not by running the
+game or the tests. Anything marked **unverified** was not confirmed.
+
+## Current state
+
+Merged to this fork's `main` since it became the main line:
+
+| PR | What | Verification on record |
+|----|------|------------------------|
+| #1 | README fork notice, CONTRIBUTING | n/a |
+| #2 | Seamless character fades (upstream #173) alongside Hall of Meat injury rendering | Unit tests exist (`tests/character_fade_test.cpp`, not run in this review); in-game result not recorded here |
+| #3 | Streaming flicker: a changed texture payload must be seen on two consecutive polls before it is re-decoded (`skate3_native_render_scene_tex_confirm`) | README known issue was removed afterwards (#5) |
+| #4 | Edit Skater: texture hold and sticky sites carry a piece signature, so recycled mesh addresses do not inherit another piece's art | README known issue removed afterwards |
+| #6 | `cac_hair` Kajiya-Kay strand highlight (replaces a view fresnel) | Verified in-game by the user (per the CAS hair notes) |
+| #8 | `cac_hair` receives the world sun shadow | Verified in-game by the user (same notes) |
+| #7 | PC settings pages inside the game's own Options menu | Not recorded here |
+| #9 | SDK upgrade to rexglue-sdk v0.10.0 | Merged with a merge commit (`44bea37`), as required. A post-merge build and run is not recorded here |
+
+Open or missing:
+
+- Park-editor warehouses (the last README known issue).
+- The fork has no GitHub releases.
+- No automated checks of any kind (see R1).
+
+## Prioritized next work
+
+### P1: ship and keep the docs honest
+
+1. **First fork release, or reword the README.** `gh release list` is empty.
+   The README's Windows, Linux and macOS steps say "download ... from the
+   releases page" and one note says the links go to upstream's releases and
+   lack this fork's fixes. Either cut a release from `main` (three platform
+   builds; macOS is the least tested) and repoint the links, or keep the note
+   and make each platform section point at it. Effort: release 1-2 days;
+   README-only 30 minutes.
+2. **README refresh** (see "README check"). Effort: 30 minutes.
+3. **Minimal CI.** There is no `.github/` directory. A full build needs a game
+   dump for codegen, so start with the cheap checks in R1. Effort: 0.5-1 day.
+
+### P2: rendering work
+
+4. **Park-editor warehouses** (separate session `park-warehouses`). Interior
+   venues run a different environment shader whose constant bank fails the
+   world-row sanity gate (near-zero sun, exposure around 0.001), so world rows
+   latch stale outdoor state. Already on `main`: the `g_shadow_rows_frame`
+   freshness stamp (`src/skate3_native_scene_state.h`) and gating the static
+   sun map on `scene.shadow_fresh` (fixes pure-black walls and floor). What is
+   left: the interior env shader has no native world-material port, or its rows
+   are never captured. Blocked on captures. Run with
+   `--skate3_native_render_capture_hotkeys=true`, stand in a park-editor
+   warehouse, press F6 (native) then F10, switch to the emulated renderer
+   (F5/F6), press F10 again, and take a screenshot of each. Then diff the PS
+   ucode hash, CTAB names, c-bank, textures and blend state, and add the bank
+   to the capture gate (or give interiors their own path). Effort: unknown
+   until captured; guess 2-4 days. Other sessions should not edit renderer
+   source meanwhile.
+5. **Upstream draft mchughalex/skate3recomp#94 ("Stabilize native texture
+   streaming").** Its two-observation payload confirmation is already in as
+   #3, so that half needs no port. The other half is not ported: a draw whose
+   first diffuse decode is pending is skipped (`g_skip_new` and
+   `tex_pending_first`, `src/skate3_native_scene_gpu.cpp` near line 9130),
+   while #94 keeps drawing it with the neutral texture fallback to remove
+   geometry pop-in. Risk: a neutral flash replaces a short absence, so it
+   needs an in-game check and probably a cvar. The upstream diff is small
+   (+21/-20 in that file). Effort: 0.5 day plus in-game testing.
+6. **Hair follow-ups** (from the CAS hair notes): hair normal map, per-vertex
+   fog, and an exact port of `defaulthair` (fam 5, NPC hair), which still uses
+   the old view-fresnel model. Effort: 1-2 days each; fam 5 is the largest.
+
+### P3: hardening
+
+See "Review findings".
+
+## Review findings
+
+Reviewed by reading the diffs of #2, #3, #4, #6, #7, #8 and, lightly, #9. No
+behavior was changed. Nothing below is a confirmed bug; these are risks and
+gaps, roughly in order of value.
+
+### Missing checks
+
+- **R1. Tests and SPIR-V consistency are not enforced.** `tests/*.cpp` and the
+  Python generators are not referenced from `CMakeLists.txt` (no `add_test`,
+  no `enable_testing`), and the repo has no CI. The committed SPIR-V header
+  (about 34k lines) is regenerated by hand with a pinned DXC
+  (`tests/regenerate_character_fade_spirv.py` requires DXC 1.9.2602.17 and has
+  a `--check` mode). Nothing fails if someone edits an HLSL file and forgets to
+  regenerate, in which case D3D12 (HLSL compiled at build time) and Vulkan
+  (committed SPIR-V) silently diverge. #6 and #8 each touched HLSL and
+  regenerated the header (about 15k changed lines apiece), so this path is
+  exercised often. Proposal: a CMake target or CI job that runs each
+  generator's `--check` and builds `tests/*.cpp` as ctest targets. The
+  character-fade script's docstring says it regenerates only scene `ps_main`'s
+  four variants; how #6 and #8 regenerated the rest is not in the repo
+  (**unverified**), so consolidate into one regenerate-everything script.
+  Effort: 0.5-1 day.
+- **R2. No regression test for the streaming and piece-identity logic.** The
+  texture confirmation state machine (#3) and the sticky-site piece signature
+  (#4) are branchy code inside the roughly 10k-line `RenderScene` with no unit
+  tests. Extracting them (as `character_fade.h` was) would make them testable.
+  Effort: 1 day.
+
+### Correctness and parity risks
+
+- **R3. D3D12 vs Vulkan: depth-equal fade pass (#2).** The fade color pass
+  uses `CompareFunc::kEqual` against depth written by a separate
+  `pso_fade_depth` pipeline. That needs bit-identical vertex positions across
+  the two pipelines. The same VS bytecode usually gives that, but Vulkan does
+  not guarantee it without an invariant position output. A failure would show
+  as flickering holes in fading characters. **Unverified:** I did not check VS
+  invariance or run the fade on Vulkan. Check on a Vulkan build; if it
+  misbehaves, switch to `kLessEqual` or add the decoration. Effort: 2 hours to
+  check, 1 hour to fix.
+- **R4. Shared constant-ring use by the fade path (#2).** Each draw now resets
+  b2 to a neutral block, and fading bodies reserve extra 512-byte blocks
+  through `CharacterFadeUniformCache`. When the reservation is invalid the draw
+  returns early; offsets must stay 256-byte aligned (a D3D12 CBV rule). A
+  stress case (many fading characters, such as a crowd at a marker) would
+  confirm that a full bone ring never drops a body visibly. **Unverified.**
+  Effort: 2 hours.
+- **R5. Caches keyed on mesh address (#4).** `tex_sticky` is keyed by
+  `(mesh address << 3) | slot`, and the new piece signature is the shading
+  class plus total index count. Two different pieces with the same class and
+  index count at a recycled address would still share art. Unlikely, but index
+  count is weak identity. Only the texture hold was audited; other mesh-address
+  keyed caches may have the same class of problem (**unverified**). A stronger
+  key could include the index buffer address or vertex format. Effort: 0.5 day
+  to audit.
+- **R6. Texture confirmation latency (#3).** Confirmation needs two matching
+  polls, with an escape after four consecutive changed polls so content that
+  never settles still updates. Gameplay polls every 16 frames (menus every 2),
+  so a genuine update can take noticeably longer than before, although a
+  pending candidate pulls the recheck in to +2 frames. Acceptable trade. Worth
+  documenting that `skate3_native_render_scene_tex_confirm=false` restores the
+  old behavior. The two diagnostic counters use function-local statics, which
+  are shared process-wide; fine. Low priority.
+- **R7. Hair shader (#6, #8).** The highlight uses a screen-space tangent
+  (`ScreenTangentFrame`) because the skinned layout carries no tangent; the
+  real shader uses the vertex tangent, so results can differ on UV islands
+  mirrored by authoring. Degenerate derivatives are clamped, so no NaN risk
+  from that function. The shadow term uses the native static sun map as a
+  stand-in for `shadowWorld` and does not apply the game's `c3.w` floor.
+  Both were accepted in-game by the user; a per-pixel diff against the
+  emulated renderer would show what remains. Effort: 0.5 day.
+- **R8. Options menu (#7) depends on exact guest addresses.** It writes the
+  game's Options tables at fixed addresses (`0x83026EC8`, `0x83026FE8`) and
+  overrides the localizer function `sub_8290C1C0`, and it only compiles in when
+  `SKATE3_HAS_TITLE_UPDATE` is set, so retail-only builds have no PC settings
+  rows. It validates the tables first (`ImageMatches`) and logs a warning
+  instead of patching on mismatch, which is the right defense. The guest heap
+  allocations are never freed, which is fine for a once-per-process install.
+  Remaining risk: a changed image silently loses the menu with only a log
+  warning. A short doc note on how the addresses were found would help the next
+  person (the RE notes live outside the repo). Effort: 1 hour.
+- **R9. Cleanup.** The `ch_body_fade` row is addressed as `rows + 72` in C++
+  and as the last `float4` of `cbuffer CH` in HLSL with no shared constant or
+  `static_assert`, so a layout change would compile and misbehave. #2 also left
+  an over-long line in the `EnsureScenePsoFamily` pipeline list. Effort:
+  1 hour.
+
+### PR #9 (lighter pass)
+
+Merged as a merge commit (`44bea37`). It deleted about 90 lines of ISO and
+title-update installer code that the SDK now provides and adjusted the codegen
+manifests and patch scripts. **Unverified:** a clean recursive clone,
+configure and build on Linux and macOS after the upgrade, and whether the
+macOS artifact list in the README (now including `librexgpu-xenos.dylib`)
+matches a real build.
+
+## README check
+
+Against `main` at `44bea37`:
+
+1. **"The fork is based on rexglue's 0.8.0 release line"** (rexglue Fork
+   section) is stale; #9 moved the SDK to v0.10.0. Update.
+2. **"Changes in this fork so far" is incomplete.** It does not mention the
+   in-game Options menu PC settings (#7), the streaming texture flicker fix
+   (#3), the Edit Skater texture fix (#4), the cac_hair highlight and shadow
+   fixes (#6, #8), or the SDK v0.10.0 upgrade (#9). Update.
+3. **Download links and release wording** (How Do I Play): see P1 item 1.
+4. **Known issues** still says skate parks and park editing have "some general
+   visual parity / rendering issues". Accurate but vague; narrow or remove it
+   once warehouses are done.
+5. Build requirements say Clang 18 or newer in one place and Clang 20 for
+   Ubuntu in another. Probably consistent (different baselines), but not
+   checked against SDK v0.10.0's actual requirement (**unverified**).
+
+## Housekeeping
+
+- Merged PR branches (for example `claude/rexglue-skate3-sdk-upgrade-721ad7`)
+  can be deleted from the fork.
+- Other upstream PRs are not covered by this plan beyond #94. Upstream #131
+  (a cross-thread use-after-free fix on instance teardown, a Linux crash fix)
+  is an open draft that may be worth a look; I did not check whether it is
+  already in this fork (**unverified**).
