@@ -39,18 +39,6 @@ That dumps the draws and a full guest-memory `.gsnap` into
 - **Next step:** take an F10 capture inside a park-editor warehouse to see what
   the interior draws look like and why the gate rejects them.
 
-### KI-5: Enhanced shadows show artifacts
-
-- **Status:** investigating
-- **Area:** native renderer, shadows
-- **Tracking:** fix session `enhanced-shadows` (branch `fix-enhanced-shadows`)
-- **Symptom:** with Enhanced sun shadows on (Settings > Video), shadows mostly
-  appear as strange artifacts rather than an improvement over the stock
-  shadows.
-- **Cause so far:** unknown.
-- **Next step:** get a repro (location, settings, D3D12 or Vulkan), then use
-  the shadow cvars (static casters, PCSS, bias) to isolate which part causes it.
-
 ### KI-6: Tattoos don't show on the player character
 
 - **Status:** open
@@ -70,6 +58,30 @@ That dumps the draws and a full guest-memory `.gsnap` into
   tattoo never reaches the texture. The texture-space composite pass may be
   suppressed or failing, its resolve may be lost, or the recomp may break a
   CPU-side step.
+
+### KI-7: Dev builds hang on the splash screen with the native renderer on at boot
+
+- **Status:** open
+- **Area:** native renderer, startup
+- **Tracking:** none yet
+- **Symptom:** a relwithdebinfo build of current `main` that boots with the
+  native renderer on gets past language select, then sits on the Skate 3
+  splash screen forever. Seen on D3D12 and Vulkan, in several worktrees, from
+  about 12:44 on 2026-10-12 (`v2.1.0.10-dev.gc8ba8ac` and later).
+- **Log:** the log has "rendering the loading screen NATIVELY", "pipelines
+  created", "shadow atlas created" and "gameplay (prewarm: 0 meshes ...)",
+  then only nrhi mem lines. "FMV planes published" never appears; a working
+  boot logs it within seconds.
+- **Workaround:** launch with `--skate3_native_render_scene=false`, then press
+  F5 in-game to switch to native.
+- **Who it affects:** the v2.1.0 release boots with the scene off ("renderer
+  registered (scene off)"), so release players may not hit this. v2.0.2 booted
+  with the scene on and worked. Either the default changed or a regression
+  landed between v2.0.2 and `main`.
+- **Next step:** bisect between v2.0.2 and `main`. The first suspects are
+  PR #17's native-scene commits: SDK cvar overrides restored on scene off,
+  freecam camera release and smoothing, and the portrait/menu "suppress mode"
+  overrides.
 
 ## Resolved
 
@@ -114,3 +126,20 @@ That dumps the draws and a full guest-memory `.gsnap` into
   the amounts into `char_rows`. The renderer binds them at t8/t9, and
   `scene_char.hlsli` composites them. Cvar:
   `skate3_native_render_scene_char_decals`.
+
+### KI-5: Enhanced shadows show artifacts
+
+- **Status:** won't fix (shelved) in rubensteezy/skate3recomp#21. The cause
+  was never found. The options were removed instead.
+- **Symptom:** with Enhanced Shadows (the native static sun-shadow map) and
+  PCSS on, shadows looked blocky or the wrong shape, not better than stock.
+  Repro: D3D12, render scale 3x, MSAA 4x/8x.
+- **What #21 did:** removed the options from Settings > Video, Options >
+  Graphics and F12 MAX QUALITY, and turned them off by default. The code is
+  kept behind `--skate3_native_render_scene_experimental_static_shadows=true`
+  and `--skate3_native_render_scene_experimental_pcss=true`.
+- **Ruled out:** the static caster cache holding `proxyworld.default`
+  stand-in meshes. Dropping them made no visible difference.
+- **Main suspect if revisited:** the map casts along the material sun (c6),
+  which is about 43 degrees off the game's own stylized shadow axis and may
+  disagree with the baked lightmaps.
