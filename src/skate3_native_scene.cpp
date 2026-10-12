@@ -4326,9 +4326,18 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
   // The decoded HoM VS declares i_boneArray at c7 for 183 float4 rows:
   // 61 bones. Later registers are unrelated parameters, not extra bones.
   const uint32_t palette_floats = hom_shader ? 61u * 12u : kPaletteFloats;
+  // Whole bones only, and only from inside the 256-register VS bank (the
+  // bound SkinPointBankRows scores with): 84 bones fill c4..c255 exactly, so
+  // a palette refined to c5/c7/c8 would otherwise read up to 4 registers past
+  // c255 into whatever the device shadow stores next. The tail bones stage
+  // as zeros; no shader bound at that base can index them.
+  const uint32_t bank_floats = palette_base < 256 ? (256 - palette_base) * 4 : 0;
+  const uint32_t in_bank_floats = std::min(palette_floats, bank_floats / 12 * 12);
   item.bones.resize(palette_floats);
   for (uint32_t i = 0; i < palette_floats; ++i) {
-    const float f = LoadGuestF32(base, bank + (palette_base * 4 + i) * 4);
+    const float f = i < in_bank_floats
+                        ? LoadGuestF32(base, bank + (palette_base * 4 + i) * 4)
+                        : 0.0f;
     item.bones[i] = (f > -1e7f && f < 1e7f) ? f : 0.0f;
   }
   if (item.hair) {
