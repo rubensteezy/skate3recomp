@@ -2,14 +2,15 @@
 
 #include <functional>
 
-// "PC Settings" page in the game's own Options screen (FrontEndState_Options,
-// options.apt): the live recomp settings as native selector rows, plus a row
-// that opens the full host settings overlay.
+// Live recomp settings in the game's own Options screen (FrontEndState_Options,
+// options.apt): Graphics, Display and PC Controls rows on the root Options
+// screen open pages of native selector rows, and All PC Settings opens the
+// full host settings overlay.
 namespace skate3::options_menu {
 
-// Adds the PC Settings row to the root Options layout. Call once after the XEX
-// image is loaded and before the guest launches. No-op (logged) when the image
-// does not match the expected title update layout or the cvar is off.
+// Adds the rows to the root Options layout. Call once after the XEX image is
+// loaded and before the guest launches. No-op (logged) when the image does not
+// match the expected title update layout or the cvar is off.
 void Install();
 
 // Both callbacks are invoked from the guest thread and must marshal to the UI

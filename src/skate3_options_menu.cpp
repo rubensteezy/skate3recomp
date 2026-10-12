@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -22,8 +23,8 @@
 #include <rex/system/xmemory.h>
 
 REXCVAR_DEFINE_BOOL(skate3_options_menu_entry, true, "Skate 3",
-                    "Add a PC Settings page to the game's Options menu with the live recomp "
-                    "settings (takes effect on restart)");
+                    "Add the live recomp settings to the game's Options menu (takes effect "
+                    "on restart)");
 
 namespace skate3::options_menu {
 
@@ -46,29 +47,37 @@ namespace {
 //   The movie pulls everything through GameSettings_* APT natives and the
 //   state's per-row getters; Back (input handler, event 3) always returns to
 //   the root screen.
-// Option id 23 is an "option"-typed entry no layout uses (title "0"); it is
-// borrowed for the root "PC Settings" row. Our pages are screen ids past the
-// game's tables (kFirstPageScreen + page index) that every table reader below
-// answers for from host rows. All text goes through the localizer hook, which
-// resolves our host-owned string IDs.
+// "option"-typed ids that no layout uses and no handler special-cases are
+// borrowed for our root rows (their titles repointed at our string IDs). Our
+// pages are screen ids past the game's tables (kFirstPageScreen + page index)
+// that every table reader below answers for from host rows. All text goes
+// through the localizer hook, which resolves our host-owned string IDs.
 constexpr uint32_t kOptionTable = 0x83026EC8;
 constexpr uint32_t kScreenLayouts = 0x83026FE8;
 constexpr uint32_t kScreenCount = 13;
 constexpr uint32_t kSlotsPerScreen = 16;
 constexpr uint32_t kRootScreens[] = {0, 1};
 constexpr int32_t kRootLayout[] = {2, 3, 4, 5, 6, 35};
-constexpr int32_t kPcSettingsOptionId = 23;
-constexpr uint32_t kSpareOptionTitle = 0x8220337C;  // "0"
-constexpr int32_t kAudioOptionId = 3;               // layout sanity check
-constexpr int32_t kSelectorOptionId = 11;           // camera angle: "selector"
+
+struct SpareOption {
+  int32_t id;
+  std::string_view title;  // the game's (unused) title string ID
+};
+constexpr SpareOption kSpareOptions[] = {
+    {23, "0"},
+    {1, "ID_GAMESETTINGS_MUSICPLAYER"},
+    {22, "ID_GAMESETTINGS_VIEW_TOS"},
+    {27, "ID_GAMESETTINGS_RESET_CAREER"},
+};
+constexpr int32_t kAudioOptionId = 3;      // layout sanity check
+constexpr int32_t kSelectorOptionId = 11;  // camera angle: "selector"
 constexpr uint32_t kFirstPageScreen = kScreenCount;
 
 constexpr uint32_t kStateScreenOffset = 68;
 constexpr uint32_t kStateRowOffset = 72;
 
-// Literal ("#") and stock string IDs the GameSettings natives push.
-constexpr uint32_t kStringEmpty = 0x822039C4;         // "#"
-constexpr uint32_t kStringCommonSelect = 0x822039B0;  // "ID_COMMON_SELECT"
+// Literal ("#") string ID the GameSettings natives push for "nothing".
+constexpr uint32_t kStringEmpty = 0x822039C4;
 
 // Input handler events (FrontEndState_Options vtable +40).
 constexpr uint32_t kInputBack = 3;
@@ -79,31 +88,20 @@ constexpr uint32_t kInputRight = 15;
 constexpr uint32_t kRefreshScreen = 1;
 constexpr uint32_t kRefreshValues = 50;
 
-// FE sounds the Options screen uses for sub-screen entry, Back and selectors.
+// FE sounds the Options screen uses for sub-screen entry and selector steps.
 constexpr uint64_t kSubmenuSound = 0x373D38D7EA167A71ull;
-constexpr uint64_t kBackSound = 0x4D927CD64CC8B818ull;
 constexpr uint64_t kSelectorLeftSound = 0xAD8BF9A0B4997B49ull;
 constexpr uint64_t kSelectorRightSound = 0xD8EE38A61C45EA28ull;
 
-constexpr std::string_view kHubId = "ID_RECOMP_PC_SETTINGS";
-constexpr std::string_view kHubTitle = "PC Settings";
-
-enum class RowKind {
-  kSelector,  // left/right cycle labels
-  kPage,      // A opens another page
-  kOverlay,   // A opens the host settings overlay
-};
-
+// A selector row: left/right cycle its labels.
 struct Row {
   std::string title;
   std::string desc;
-  RowKind kind = RowKind::kSelector;
   std::vector<std::string> labels;
   std::function<int()> get;        // current label index
   std::function<void(int)> set;    // apply a label index
   std::function<bool()> enabled;   // null = always enabled
   bool rebuild_on_change = false;  // other rows' enabled state depends on it
-  size_t target_page = 0;          // kPage
   // Guest string IDs, resolved by the localizer hook.
   uint32_t title_id = 0;
   uint32_t desc_id = 0;
@@ -116,11 +114,19 @@ struct Page {
   uint32_t title_id = 0;
 };
 
+// A row we add to the root Options screen: opens a page or the overlay.
+struct RootRow {
+  std::string title;
+  int32_t option_id = 0;
+  int page = -1;  // -1 = the host settings overlay
+  uint32_t title_id = 0;
+};
+
 std::atomic<bool> g_installed{false};
-std::vector<Page> g_pages;  // [0] = hub
+std::vector<Page> g_pages;
+std::vector<RootRow> g_root_rows;
 std::unordered_map<uint32_t, uint32_t> g_locale;  // ID hash -> guest text
 uint32_t g_type_selector = 0;
-uint32_t g_type_option = 0;
 
 // Same hash GetLocaleText (sub_825AA818) feeds the localizer.
 uint32_t LocaleHash(std::string_view id) {
@@ -145,7 +151,7 @@ int NearestIndex(const std::vector<double>& values, double value) {
   return best;
 }
 
-// Rows for cvars this build lacks are skipped; they return null.
+// Rows for cvars this build lacks are skipped; the Add* helpers return null.
 Row* AddRow(Page& page, std::string title, std::string desc) {
   Row row;
   row.title = std::move(title);
@@ -281,7 +287,7 @@ Page BuildDisplayPage() {
 }
 
 Page BuildControlsPage() {
-  Page page{"Controls"};
+  Page page{"PC Controls"};
   {
     const std::vector<double> values = {0.25, 0.5, 0.75, 1.0, 1.25, 1.5,
                                         2.0,  2.5, 3.0,  4.0, 5.0};
@@ -302,26 +308,20 @@ Page BuildControlsPage() {
   return page;
 }
 
-void BuildPages() {
-  g_pages.push_back(Page{std::string(kHubTitle)});
-  const std::pair<Page, const char*> categories[] = {
-      {BuildGraphicsPage(), "Renderer, lighting and shadow quality."},
-      {BuildDisplayPage(), "Field of view, draw distance and on-screen readouts."},
-      {BuildControlsPage(), "Mouse sensitivity and controller shortcuts."},
-  };
-  for (const auto& [page, desc] : categories) {
+// Pages with rows each get a root row (in spare-id order), then the overlay.
+void BuildMenu() {
+  for (Page page : {BuildGraphicsPage(), BuildDisplayPage(), BuildControlsPage()}) {
     if (page.rows.empty()) {
       continue;
     }
-    g_pages.push_back(page);
-    Row* row = AddRow(g_pages.front(), page.title, desc);
-    row->kind = RowKind::kPage;
-    row->target_page = g_pages.size() - 1;
+    g_root_rows.push_back({page.title, 0, static_cast<int>(g_pages.size())});
+    g_pages.push_back(std::move(page));
   }
-  Row* all = AddRow(g_pages.front(), "All PC Settings",
-                    "Every recomp setting: graphics API, resolution, frame rate, profiles "
-                    "and more.");
-  all->kind = RowKind::kOverlay;
+  g_root_rows.push_back({"All PC Settings", 0, -1});
+  static_assert(std::size(kSpareOptions) >= 4, "one spare option id per root row");
+  for (size_t i = 0; i < g_root_rows.size(); ++i) {
+    g_root_rows[i].option_id = kSpareOptions[i].id;
+  }
 }
 
 // ---- Guest strings ------------------------------------------------------------
@@ -330,10 +330,13 @@ void BuildPages() {
 // the localizer map. Returns false when the allocation fails.
 bool PublishStrings(rex::memory::Memory* memory, uint8_t* base) {
   std::vector<std::pair<std::string, std::string>> entries;
+  for (size_t i = 0; i < g_root_rows.size(); ++i) {
+    entries.emplace_back("ID_RECOMP_ROOT_" + std::to_string(i), g_root_rows[i].title);
+  }
   for (size_t p = 0; p < g_pages.size(); ++p) {
     const Page& page = g_pages[p];
-    const std::string prefix = "ID_RECOMP_PC_P" + std::to_string(p);
-    entries.emplace_back(p == 0 ? std::string(kHubId) : prefix, page.title);
+    const std::string prefix = "ID_RECOMP_PAGE_" + std::to_string(p);
+    entries.emplace_back(prefix, page.title);
     for (size_t r = 0; r < page.rows.size(); ++r) {
       const Row& row = page.rows[r];
       const std::string row_prefix = prefix + "_R" + std::to_string(r);
@@ -366,6 +369,9 @@ bool PublishStrings(rex::memory::Memory* memory, uint8_t* base) {
     g_locale[LocaleHash(id)] = write(text);
   }
   size_t next = 0;
+  for (auto& root : g_root_rows) {
+    root.title_id = ids[next++];
+  }
   for (auto& page : g_pages) {
     page.title_id = ids[next++];
     for (auto& row : page.rows) {
@@ -398,14 +404,22 @@ uint32_t OptionTitleSlot(int32_t id) { return kOptionTable + id * 8; }
 uint32_t OptionTypeSlot(int32_t id) { return kOptionTable + id * 8 + 4; }
 
 bool ImageMatches(uint8_t* base) {
-  if (REX_LOAD_U32(OptionTitleSlot(kPcSettingsOptionId)) != kSpareOptionTitle ||
-      !GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(kPcSettingsOptionId)), "option") ||
-      !GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(kSelectorOptionId)), "selector") ||
+  if (!GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(kSelectorOptionId)), "selector") ||
       !GuestStringEquals(base, REX_LOAD_U32(OptionTitleSlot(kAudioOptionId)),
                          "ID_GAMESETTINGS_AUDIO_SETTINGS") ||
-      !GuestStringEquals(base, kStringEmpty, "#") ||
-      !GuestStringEquals(base, kStringCommonSelect, "ID_COMMON_SELECT")) {
+      !GuestStringEquals(base, kStringEmpty, "#")) {
     return false;
+  }
+  for (const SpareOption& spare : kSpareOptions) {
+    if (!GuestStringEquals(base, REX_LOAD_U32(OptionTitleSlot(spare.id)), spare.title) ||
+        !GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(spare.id)), "option")) {
+      return false;
+    }
+    for (uint32_t slot = 0; slot < kScreenCount * kSlotsPerScreen; ++slot) {
+      if (static_cast<int32_t>(REX_LOAD_U32(kScreenLayouts + slot * 4)) == spare.id) {
+        return false;
+      }
+    }
   }
   for (uint32_t screen : kRootScreens) {
     for (uint32_t slot = 0; slot < kSlotsPerScreen; ++slot) {
@@ -440,12 +454,22 @@ Row* RowAt(Page& page, uint32_t row) {
 
 bool RowEnabled(const Row& row) { return !row.enabled || row.enabled(); }
 
-bool IsPcSettingsRootRow(uint8_t* base, uint32_t state, uint32_t row) {
-  const uint32_t screen = REX_LOAD_U32(state + kStateScreenOffset);
-  if (screen >= kScreenCount || row >= kSlotsPerScreen) {
-    return false;
+// Our row at `row` of a game screen, or null.
+const RootRow* RootRowAt(uint8_t* base, uint32_t state, uint32_t row) {
+  if (state < 0x10000 || row >= kSlotsPerScreen) {
+    return nullptr;
   }
-  return static_cast<int32_t>(REX_LOAD_U32(LayoutSlot(screen, row))) == kPcSettingsOptionId;
+  const uint32_t screen = REX_LOAD_U32(state + kStateScreenOffset);
+  if (screen >= kScreenCount) {
+    return nullptr;
+  }
+  const int32_t id = static_cast<int32_t>(REX_LOAD_U32(LayoutSlot(screen, row)));
+  for (const RootRow& root : g_root_rows) {
+    if (root.option_id == id) {
+      return &root;
+    }
+  }
+  return nullptr;
 }
 
 // The live FrontEndState_Options instance, as the GameSettings natives find it.
@@ -492,12 +516,6 @@ void RefreshScreen(PPCContext& ctx, uint8_t* base, uint32_t state, uint32_t mode
   ctx.r4.u64 = REX_LOAD_U32(state + 8);
   ctx.r5.u64 = mode;
   REX_CALL_INDIRECT_FUNC(function);
-}
-
-void ShowPage(PPCContext& ctx, uint8_t* base, uint32_t state, size_t page, uint64_t sound) {
-  PlaySound(ctx, base, sound);
-  REX_STORE_U32(state + kStateScreenOffset, kFirstPageScreen + static_cast<uint32_t>(page));
-  RefreshScreen(ctx, base, state, kRefreshScreen);
 }
 
 void StepRow(PPCContext& ctx, uint8_t* base, uint32_t state, Row& row, int delta) {
@@ -549,25 +567,29 @@ void Install() {
   uint8_t* base = memory->virtual_membase();
   if (!ImageMatches(base)) {
     REXLOG_WARN("Options menu: unexpected Options tables in the loaded image; "
-                "PC Settings pages not added");
+                "PC settings rows not added");
     return;
   }
-  BuildPages();
+  BuildMenu();
   if (!PublishStrings(memory, base)) {
     g_pages.clear();
-    REXLOG_WARN("Options menu: guest string allocation failed; PC Settings pages not added");
+    g_root_rows.clear();
+    REXLOG_WARN("Options menu: guest string allocation failed; PC settings rows not added");
     return;
   }
   g_type_selector = REX_LOAD_U32(OptionTypeSlot(kSelectorOptionId));
-  g_type_option = REX_LOAD_U32(OptionTypeSlot(kPcSettingsOptionId));
 
-  REX_STORE_U32(OptionTitleSlot(kPcSettingsOptionId), g_pages.front().title_id);
-  for (uint32_t screen : kRootScreens) {
-    REX_STORE_U32(LayoutSlot(screen, std::size(kRootLayout)),
-                  static_cast<uint32_t>(kPcSettingsOptionId));
+  for (size_t i = 0; i < g_root_rows.size(); ++i) {
+    const RootRow& root = g_root_rows[i];
+    REX_STORE_U32(OptionTitleSlot(root.option_id), root.title_id);
+    for (uint32_t screen : kRootScreens) {
+      REX_STORE_U32(LayoutSlot(screen, static_cast<uint32_t>(std::size(kRootLayout) + i)),
+                    static_cast<uint32_t>(root.option_id));
+    }
   }
   g_installed.store(true, std::memory_order_release);
-  REXLOG_INFO("Options menu: PC Settings added ({} pages)", g_pages.size());
+  REXLOG_INFO("Options menu: {} PC settings rows added to the root Options screen",
+              g_root_rows.size());
 #endif
 }
 
@@ -590,61 +612,49 @@ extern "C" REX_FUNC(sub_8290C1C0) {
 
 // ---- FrontEndState_Options methods (r3 = state) -------------------------------
 
-// OnMenuSelect(menu, row = r5, item name). The root PC Settings row opens the
-// hub; on our pages A opens pages and the overlay, and (as on the game's own
-// selectors) does nothing on selector rows.
+// OnMenuSelect(menu, row = r5, item name). Our root rows open their page or
+// the overlay; on our pages A does nothing, as on the game's own selectors.
 extern "C" REX_FUNC(sub_8260D290) {
   if (IsInstalled()) {
     const uint32_t state = ctx.r3.u32;
-    const uint32_t row_index = ctx.r5.u32;
-    if (Page* page = PageOf(base, state)) {
-      Row* row = RowAt(*page, row_index);
-      if (row && RowEnabled(*row)) {
-        if (row->kind == RowKind::kPage) {
-          ShowPage(ctx, base, state, row->target_page, kSubmenuSound);
-        } else if (row->kind == RowKind::kOverlay) {
-          PlaySound(ctx, base, kSubmenuSound);
-          if (g_open_settings) {
-            g_open_settings();
-          }
-        }
-      }
+    if (PageOf(base, state)) {
       return;
     }
-    if (state >= 0x10000 && IsPcSettingsRootRow(base, state, row_index)) {
-      ShowPage(ctx, base, state, 0, kSubmenuSound);
+    if (const RootRow* root = RootRowAt(base, state, ctx.r5.u32)) {
+      PlaySound(ctx, base, kSubmenuSound);
+      if (root->page >= 0) {
+        REX_STORE_U32(state + kStateScreenOffset,
+                      kFirstPageScreen + static_cast<uint32_t>(root->page));
+        RefreshScreen(ctx, base, state, kRefreshScreen);
+      } else if (g_open_settings) {
+        g_open_settings();
+      }
       return;
     }
   }
   __imp__sub_8260D290(ctx, base);
 }
 
-// Input handler (r5 = event). Left/right step selectors. Back from a category
-// returns to the hub; Back from the hub keeps the game's handling (the root
-// Options screen). Nothing else is consumed, so the game never indexes its
-// tables with a page's screen id.
+// Input handler (r5 = event). On our pages left/right step selectors and Back
+// keeps the game's handling (the root Options screen); nothing else is
+// consumed, so the game never indexes its tables with a page's screen id.
 extern "C" REX_FUNC(sub_8260C258) {
   if (IsInstalled()) {
     const uint32_t state = ctx.r3.u32;
     const uint32_t event = ctx.r5.u32;
-    if (Page* page = PageOf(base, state)) {
-      if (event == kInputBack) {
-        if (page == &g_pages.front()) {
-          __imp__sub_8260C258(ctx, base);
-          return;
+    if (event == kInputLeft || event == kInputRight) {
+      if (Page* page = PageOf(base, state)) {
+        Row* row = RowAt(*page, REX_LOAD_U32(state + kStateRowOffset));
+        if (row && RowEnabled(*row)) {
+          StepRow(ctx, base, state, *row, event == kInputLeft ? -1 : 1);
+          ctx.r3.u64 = 1;
+        } else {
+          ctx.r3.u64 = 0;
         }
-        ShowPage(ctx, base, state, 0, kBackSound);
-        ctx.r3.u64 = 1;
         return;
       }
-      Row* row = RowAt(*page, REX_LOAD_U32(state + kStateRowOffset));
-      if ((event == kInputLeft || event == kInputRight) && row &&
-          row->kind == RowKind::kSelector && RowEnabled(*row)) {
-        StepRow(ctx, base, state, *row, event == kInputLeft ? -1 : 1);
-        ctx.r3.u64 = 1;
-      } else {
-        ctx.r3.u64 = 0;
-      }
+    } else if (PageOf(base, state) && event != kInputBack) {
+      ctx.r3.u64 = 0;
       return;
     }
   }
@@ -668,7 +678,7 @@ extern "C" REX_FUNC(sub_8260D7E8) {
   if (IsInstalled()) {
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
-      ctx.r3.s64 = row && row->kind == RowKind::kSelector ? row->get() : 0;
+      ctx.r3.s64 = row ? row->get() : 0;
       return;
     }
   }
@@ -680,8 +690,7 @@ extern "C" REX_FUNC(sub_8260D968) {
   if (IsInstalled()) {
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
-      ctx.r3.u64 = row && row->kind == RowKind::kSelector ? row->label_ids[row->get()]
-                                                           : kStringEmpty;
+      ctx.r3.u64 = row ? row->label_ids[row->get()] : kStringEmpty;
       return;
     }
   }
@@ -715,14 +724,12 @@ extern "C" REX_FUNC(sub_825A6F70) {
   __imp__sub_825A6F70(ctx, base);
 }
 
-// GameSettings_GetOptionType(row).
+// GameSettings_GetOptionType(row): every page row is a selector.
 extern "C" REX_FUNC(sub_825A6CE0) {
   if (IsInstalled()) {
     ArgRegisters args(ctx);
-    if (Page* page = PageOf(base, OptionsState(ctx, base))) {
-      const Row* row = RowAt(*page, static_cast<uint32_t>(AptArgInt(ctx, base, 0)));
-      AptReturnString(ctx, base,
-                      row && row->kind == RowKind::kSelector ? g_type_selector : g_type_option);
+    if (PageOf(base, OptionsState(ctx, base))) {
+      AptReturnString(ctx, base, g_type_selector);
       return;
     }
     args.Restore();
@@ -757,17 +764,13 @@ extern "C" REX_FUNC(sub_825A6E88) {
   __imp__sub_825A6E88(ctx, base);
 }
 
-// GameSettings_GetButtonHelpTextA(): "Select" on rows A acts on (pages and the
-// overlay), nothing on selectors, as the game does for its "option" rows.
+// GameSettings_GetButtonHelpTextA(): no A prompt on page rows (all
+// selectors), as the game does for its own selectors.
 extern "C" REX_FUNC(sub_825A6FE0) {
   if (IsInstalled()) {
     ArgRegisters args(ctx);
-    const uint32_t state = OptionsState(ctx, base);
-    if (Page* page = PageOf(base, state)) {
-      const Row* row = RowAt(*page, REX_LOAD_U32(state + kStateRowOffset));
-      AptReturnString(ctx, base,
-                      row && row->kind != RowKind::kSelector ? kStringCommonSelect
-                                                             : kStringEmpty);
+    if (PageOf(base, OptionsState(ctx, base))) {
+      AptReturnString(ctx, base, kStringEmpty);
       return;
     }
     args.Restore();

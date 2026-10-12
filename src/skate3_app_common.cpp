@@ -807,7 +807,7 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
-  // "PC Settings" page in the game's Options screen. Both callbacks arrive on
+  // PC settings rows in the game's Options screen. Both callbacks arrive on
   // the guest thread: open (never toggle closed) the overlay and persist row
   // changes on the UI thread.
   skate3::options_menu::SetOpenSettingsCallback([this]() {
