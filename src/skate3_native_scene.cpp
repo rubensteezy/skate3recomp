@@ -1009,6 +1009,16 @@ REXCVAR_DEFINE_BOOL(skate3_native_render_scene_tex_revalidate, true, "Skate 3",
                     "Re-fingerprint cached texture payloads every 16 frames and "
                     "re-decode on change (heals late-composed lightmap pages)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(skate3_native_render_scene_tex_confirm, true, "Skate 3",
+                    "Texture revalidation replaces a valid cached decode only "
+                    "after the SAME changed payload fingerprint is sampled on "
+                    "two consecutive polls (re-polled 2 frames later). The "
+                    "guest streams in place without a CPU-visible event, so a "
+                    "single changed sample is often a mid-write snapshot; "
+                    "re-decoding it swapped good content for a torn or "
+                    "intermediate image and back (streaming texture flicker). "
+                    "false = re-decode on the first changed sample")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_stretch_guard, true, "Skate 3",
                     "Draw-time stretch veto: skin cached sample verts of each "
                     "skinned mesh's GPU-resident decode with the final palette "
