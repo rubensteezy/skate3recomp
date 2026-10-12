@@ -74,13 +74,28 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     out_a = ch_misc.x;
   } else if (fam > 3.5) {
     // Hair (cac_hair / defaulthair): key on a wrapped N.L ramp + flat
-    // ambient, fresnel rim tint on a steeper ramp; strand coverage from
+    // ambient, highlight tint on a steeper ramp; strand coverage from
     // the mesh's "alpha" channel at the raw second texcoord (bound at t4)
     // - alpha-blended in the sorted sub-pass (hair drawn opaque is the
     // blocky-helmet look).
-    float fres = pow(1.0 - saturate(dot(cn, vd)), max(ch_light.w, 1.0));
+    float hs;
+    if (fam < 4.5) {
+      // cac_hair_defaultPS (the player / create-a-skater hair) is a
+      // Kajiya-Kay strand highlight: sin(T, H)^c11.w along the usage-6
+      // vertex tangent, H = normalize(V + L). The skinned layout carries
+      // no tangent here, so take the screen-space frame's U axis (its
+      // sign is irrelevant to sin). A view fresnel stood in for it before,
+      // which vanishes on camera-facing hair: the whole sheen was missing
+      // and the CAS hair read far darker than the emulated reference.
+      float3 tt, bb;
+      ScreenTangentFrame(cn, i.rpos, i.uv, tt, bb);
+      float th = dot(normalize(vd + ch_light.xyz), tt);
+      hs = pow(max(sqrt(saturate(1.0 - th * th)), 1e-6), max(ch_light.w, 1.0));
+    } else {
+      hs = pow(1.0 - saturate(dot(cn, vd)), max(ch_light.w, 1.0));
+    }
     float3 hl = ch_key.rgb * (saturate(ndl * 0.75 + 0.25) + ch_amb.w) +
-                ch_tintB.rgb * fres * saturate(ndl * 1.75 + 0.25);
+                ch_tintB.rgb * hs * saturate(ndl * 1.75 + 0.25);
     lin = dlin * hl;
     out_a = saturate(decal_art.Sample(smp, i.uv2).r * ch_tintB.w);
   } else if (fam > 2.5) {

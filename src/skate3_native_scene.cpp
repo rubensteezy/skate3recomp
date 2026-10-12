@@ -3520,8 +3520,10 @@ void CaptureHairTint(uint8_t* base, DrawItem& item) {
 //   livingworld_stamp (fam 3): light c9, key c15, FLAT ambient = c19.w *
 //     (0.1, 0.175, 0.3) (shader literal), exposure c13.z, alpha c21.x, stamp
 //     recolor tints c22 (red mask) / c23 (blue mask).
-//   cac_hair (fam 4): light c4, key c16, ambient c14.w * 0.25, fresnel tint
-//     c17 with power c11.w, exposure c8.z, strand-alpha scale c15.x.
+//   cac_hair (fam 4): light c4, key c16, ambient c14.w * 0.25, strand
+//     highlight tint c17 with power c11.w (Kajiya-Kay sin(T,H)^p along the
+//     vertex tangent, not a view fresnel), exposure c8.z, strand-alpha
+//     scale c15.x.
 //   defaulthair (fam 5): light c4, key c15, ambient c14.w * 0.25, fresnel
 //     tint c10 with power c9.z, exposure c8.z, strand-alpha scale c16.x.
 //   vehicle (fam 6, character.livingworld_vehicles): light c9, key c15
@@ -3540,7 +3542,7 @@ void CaptureHairTint(uint8_t* base, DrawItem& item) {
 // Ny^2)*r8); the scale and the -1 are folded into the stored rows so the
 // shader evaluates a plain 9-row basis.
 //
-// Canonical block (18 float4 rows): [0] = light dir + hair fresnel power,
+// Canonical block (18 float4 rows): [0] = light dir + hair highlight power,
 // [1] = key color + exposure, [2] = flat ambient rgb + SH-ambient
 // multiplier (hair ambient scalar in w), [3..11] = SH rows, [12] = tintA
 // (w = apply), [13] = tintB + strand-alpha scale (fams 1/2: w = the
@@ -3830,10 +3832,13 @@ void CaptureCharLighting(uint8_t* base, DrawItem& item) {
       d[14 * 4 + 0] = std::clamp(row(20u, 0) * row(18u, 3), 0.0f, 1.0f);
     }
   } else {
-    // Hair: flat ambient scalar + fresnel rim tint, strand-alpha scale.
+    // Hair: flat ambient scalar + highlight tint (cac_hair: the strand
+    // spec color; defaulthair: the fresnel rim tint), strand-alpha scale.
+    // The cac_hair strand exponent gets the wider phong-spec range.
     const float amb = row(14u, 3) * 0.25f;
     d[2 * 4 + 3] = std::clamp(amb, 0.0f, 4.0f);
-    d[3] = std::clamp(row(fam == 4 ? 11u : 9u, fam == 4 ? 3u : 2u), 1.0f, 64.0f);
+    d[3] = std::clamp(row(fam == 4 ? 11u : 9u, fam == 4 ? 3u : 2u), 1.0f,
+                      fam == 4 ? 512.0f : 64.0f);
     const uint32_t fres_r = fam == 4 ? 17u : 10u;
     for (int c = 0; c < 3; ++c) {
       d[13 * 4 + c] = std::clamp(row(fres_r, uint32_t(c)), 0.0f, 8.0f);
