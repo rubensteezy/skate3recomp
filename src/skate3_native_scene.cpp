@@ -9454,9 +9454,29 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
     if (s_last_pub.size() > 4096) {
       s_last_pub.clear();
     }
+    const auto tracked = [](const DrawItem& item) {
+      return item.ropa || item.char_family != 0 ||
+             (item.skinned && !item.bones.empty());
+    };
+    // Single-instance meshes only, like the character-rows fallback above:
+    // clones share the mesh key, so a tracked clone pair overwrote each
+    // other's entry within the frame and the caster-bank swap below served
+    // a clone its TWIN's same-frame capture (gap 0), drawing it at the
+    // twin's pose; the gap fill likewise re-published whichever instance
+    // stored last. A cloned mesh drops its entry so no single stale capture
+    // is refilled for it later.
+    std::unordered_map<uint32_t, uint32_t> pub_mesh_count;
+    for (const DrawItem& item : scene.items) {
+      if (tracked(item)) {
+        ++pub_mesh_count[item.mesh];
+      }
+    }
     for (DrawItem& item : scene.items) {
-      if (!(item.ropa || item.char_family != 0 ||
-            (item.skinned && !item.bones.empty()))) {
+      if (!tracked(item)) {
+        continue;
+      }
+      if (pub_mesh_count[item.mesh] > 1) {
+        s_last_pub.erase(item.mesh);
         continue;
       }
       PubTrack& t = s_last_pub[item.mesh];
