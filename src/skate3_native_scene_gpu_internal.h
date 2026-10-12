@@ -91,6 +91,16 @@ struct GuestTexture {
   uint32_t payload_size = 0;
   uint64_t payload_fp = 0;
   uint64_t recheck_frame = 0;
+  // Changed-payload candidate awaiting confirmation (see
+  // skate3_native_render_scene_tex_confirm): in-place streaming writes are
+  // not coherent with the renderer's sampled reads, so one changed
+  // fingerprint is not evidence that a complete new image exists. Cleared
+  // whenever a poll sees the cached payload again or a decode commits.
+  uint64_t pending_payload_fp = 0;
+  uint8_t pending_payload_polls = 0;
+  // Consecutive polls whose payload differed from the cached decode (any
+  // candidate). Bounds the confirmation for content that never holds still.
+  uint8_t changed_payload_polls = 0;
   // Consecutive failed decodes of this entry (payload still streaming in):
   // drives the escalating retry backoff at commit; the first failure
   // retries fast (the payload usually lands within a few frames; a fixed

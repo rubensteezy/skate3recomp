@@ -43,6 +43,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_lw_gap_fill);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_lw_palette);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_retain_offscreen);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_revalidate);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_confirm);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_mesh_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_mips);
 REXCVAR_DECLARE(int32_t, skate3_native_render_scene_debug);
@@ -1084,6 +1085,13 @@ void DrawCachesSection() {
                    REXCVAR_GET(skate3_native_render_scene_tex_revalidate),
                    "Re-fingerprint cached texture payloads every 16 frames, re-decode "
                    "on change (added to heal late-composed lightmap pages)"));
+  REXCVAR_SET(
+      skate3_native_render_scene_tex_confirm,
+      CvarCheckbox("Confirm payload changes",
+                   REXCVAR_GET(skate3_native_render_scene_tex_confirm),
+                   "Re-decode only after the same changed payload is sampled on two "
+                   "consecutive polls (rejects mid-stream snapshots: streaming texture "
+                   "flicker)"));
   REXCVAR_SET(skate3_native_render_scene_mesh_revalidate,
               CvarCheckbox("Mesh payload revalidation",
                            REXCVAR_GET(skate3_native_render_scene_mesh_revalidate),
