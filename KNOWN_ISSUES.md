@@ -39,18 +39,6 @@ That dumps the draws and a full guest-memory `.gsnap` into
 - **Next step:** take an F10 capture inside a park-editor warehouse to see what
   the interior draws look like and why the gate rejects them.
 
-### KI-4: Decals don't show on the player character
-
-- **Status:** investigating
-- **Area:** native renderer, character shading
-- **Tracking:** fix session `char-decals` (branch `fix-char-decals`)
-- **Symptom:** tattoos, bruising and dirt don't appear on the skater.
-- **Cause so far:** unknown. Not yet checked whether the emulated renderer (F5)
-  shows them.
-- **Next step:** work out from the game's own skin shaders how decals are
-  applied, then find which input the native character path
-  (`scene_char.hlsli`) drops.
-
 ### KI-5: Enhanced shadows show artifacts
 
 - **Status:** investigating
@@ -62,6 +50,26 @@ That dumps the draws and a full guest-memory `.gsnap` into
 - **Cause so far:** unknown.
 - **Next step:** get a repro (location, settings, D3D12 or Vulkan), then use
   the shadow cvars (static casters, PCSS, bias) to isolate which part causes it.
+
+### KI-6: Tattoos don't show on the player character
+
+- **Status:** open
+- **Area:** emulation (both renderers), character customization
+- **Tracking:** none yet
+- **Symptom:** tattoos added in Edit Skater don't appear on the skater. This
+  happens on the emulated renderer (F5) as well as the native one. Split out
+  of KI-4.
+- **Cause so far:** unknown. Since the emulated renderer is wrong too, the
+  native port isn't missing anything here. The native renderer already follows
+  the game's tattoo path (`cacstamp_skin` samples `i_decal` at tf6 through the
+  `i_customGraphic` affine, c190/c191). A fix earlier in the pipeline should
+  show on both renderers.
+- **Next step:** take an F10 capture in Edit Skater with a tattoo applied.
+  Check what the `cacstamp_skin` draw binds at tf6 (a blank or default
+  texture, or the real art) and the values in c190/c191. A blank tf6 means the
+  tattoo never reaches the texture. The texture-space composite pass may be
+  suppressed or failing, its resolve may be lost, or the recomp may break a
+  CPU-side step.
 
 ## Resolved
 
@@ -86,3 +94,23 @@ That dumps the draws and a full guest-memory `.gsnap` into
     pieces no longer pick up each other's textures.
   - #6 ports the `cac_hair` Kajiya-Kay strand highlight.
   - #8 shades `cac_hair` with the world sun shadow.
+
+### KI-4: Bruises and dirt don't show on the player character
+
+- **Status:** fixed in rubensteezy/skate3recomp#20. Bruises and dirt confirmed
+  in-game on 2026-10-12. Tattoos were split out as KI-6.
+- **Symptom:** bruising and dirt didn't appear on the skater on the native
+  renderer. The emulated renderer showed them.
+- **Cause:** the CAC pixel shaders (`cacstamp_skin`, `cac_face`,
+  `cacstamp_cloth`, `cac_cloth`, `cacstamp_shift`) blend up to two extra layers
+  over the tinted diffuse before lighting:
+  - `i_decal` is the tattoo stamp, placed with the vertex shader's
+    `i_customGraphic` affine of texcoord 1.
+  - `i_decal2` is bruise/dirt at uv0, scaled by `i_params.z` on skin or `.y`
+    on cloth.
+
+  The native fam-2 branch only drew the diffuse.
+- **Fix:** `CaptureCacDecals` captures the layers' fetch words, the affine and
+  the amounts into `char_rows`. The renderer binds them at t8/t9, and
+  `scene_char.hlsli` composites them. Cvar:
+  `skate3_native_render_scene_char_decals`.
