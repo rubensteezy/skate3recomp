@@ -10,6 +10,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -21,16 +22,18 @@
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
+#include <rex/ui/overlay/simple_settings_restart.h>
 
 REXCVAR_DEFINE_BOOL(skate3_options_menu_entry, true, "Skate 3",
-                    "Add the live recomp settings to the game's Options menu (takes effect "
-                    "on restart)");
+                    "Add the recomp settings to the game's Options menu (takes effect on "
+                    "restart)");
 
 namespace skate3::options_menu {
 
 namespace {
 std::function<void()> g_open_settings;
 std::function<void()> g_save_settings;
+std::function<void()> g_restart;
 }  // namespace
 
 #if SKATE3_HAS_TITLE_UPDATE
@@ -47,8 +50,8 @@ namespace {
 //   The movie pulls everything through GameSettings_* APT natives and the
 //   state's per-row getters; Back (input handler, event 3) always returns to
 //   the root screen.
-// "option"-typed ids that no layout uses and no handler special-cases are
-// borrowed for our root rows (their titles repointed at our string IDs). Our
+// Option ids that no layout uses and no handler special-cases are borrowed for
+// our root rows (titles repointed at our string IDs, types at "option"). Our
 // pages are screen ids past the game's tables (kFirstPageScreen + page index)
 // that every table reader below answers for from host rows. All text goes
 // through the localizer hook, which resolves our host-owned string IDs.
@@ -62,14 +65,18 @@ constexpr int32_t kRootLayout[] = {2, 3, 4, 5, 6, 35};
 struct SpareOption {
   int32_t id;
   std::string_view title;  // the game's (unused) title string ID
+  std::string_view type;
 };
 constexpr SpareOption kSpareOptions[] = {
-    {23, "0"},
-    {1, "ID_GAMESETTINGS_MUSICPLAYER"},
-    {22, "ID_GAMESETTINGS_VIEW_TOS"},
-    {27, "ID_GAMESETTINGS_RESET_CAREER"},
+    {23, "0", "option"},
+    {1, "ID_GAMESETTINGS_MUSICPLAYER", "option"},
+    {22, "ID_GAMESETTINGS_VIEW_TOS", "option"},
+    {27, "ID_GAMESETTINGS_RESET_CAREER", "option"},
+    {18, "ID_GAMESETTINGS_VSYNC_TOGGLE", "selector"},
+    {20, "ID_GAMESETTINGS_SIXAXIS_TOGGLE", "selector"},
 };
 constexpr int32_t kAudioOptionId = 3;      // layout sanity check
+constexpr int32_t kOptionTypeId = 23;      // its type pointer: "option"
 constexpr int32_t kSelectorOptionId = 11;  // camera angle: "selector"
 constexpr uint32_t kFirstPageScreen = kScreenCount;
 
@@ -88,20 +95,39 @@ constexpr uint32_t kInputRight = 15;
 constexpr uint32_t kRefreshScreen = 1;
 constexpr uint32_t kRefreshValues = 50;
 
-// FE sounds the Options screen uses for sub-screen entry and selector steps.
+// FE sounds the Options screen uses for sub-screen entry, Back and selectors.
 constexpr uint64_t kSubmenuSound = 0x373D38D7EA167A71ull;
+constexpr uint64_t kBackSound = 0x4D927CD64CC8B818ull;
 constexpr uint64_t kSelectorLeftSound = 0xAD8BF9A0B4997B49ull;
 constexpr uint64_t kSelectorRightSound = 0xD8EE38A61C45EA28ull;
 
-// A selector row: left/right cycle its labels.
+// FE popups (as FrontEndState_Options builds its confirmations): a descriptor
+// initialized by sub_82D0B0B0 holds the title and message string IDs, the
+// button count and labels, and the guest callback the chosen button index is
+// passed to (r4); sub_82D0A8D0 shows it on the popup manager.
+constexpr uint32_t kPopupManagerPtr = 0x830CFE1C;
+constexpr uint32_t kPopupDescSize = 1536;
+constexpr uint32_t kPopupTitleOffset = 0;      // char[128]
+constexpr uint32_t kPopupMessageOffset = 128;  // char[256]
+constexpr uint32_t kPopupButtonCountOffset = 384;
+constexpr uint32_t kPopupButtonOffsets[] = {388, 516};  // char[128] each
+constexpr uint32_t kPopupCallbackOffset = 1412;
+// The Options screen's own Video Calibration popup callback; hooked below and
+// answered for our popup while it is open.
+constexpr uint32_t kPopupCallback = 0x8260EA48;
+
+// A selector row: left/right cycle its labels. Restart rows stage the choice
+// (shown, not applied) until the user restarts from the Back prompt.
 struct Row {
   std::string title;
   std::string desc;
   std::vector<std::string> labels;
-  std::function<int()> get;        // current label index
-  std::function<void(int)> set;    // apply a label index
+  std::function<int()> get;        // label index the cvars select
+  std::function<void(int)> set;    // write the cvars for a label index
   std::function<bool()> enabled;   // null = always enabled
   bool rebuild_on_change = false;  // other rows' enabled state depends on it
+  bool restart = false;
+  std::optional<int> pending;      // restart rows: staged label index
   // Guest string IDs, resolved by the localizer hook.
   uint32_t title_id = 0;
   uint32_t desc_id = 0;
@@ -127,6 +153,15 @@ std::vector<Page> g_pages;
 std::vector<RootRow> g_root_rows;
 std::unordered_map<uint32_t, uint32_t> g_locale;  // ID hash -> guest text
 uint32_t g_type_selector = 0;
+uint32_t g_type_option = 0;
+uint32_t g_popup_desc = 0;
+bool g_restart_popup_open = false;  // guest thread only
+
+// String IDs of the restart prompt (copied into the popup descriptor).
+constexpr std::string_view kRestartTitleId = "ID_RECOMP_RESTART_TITLE";
+constexpr std::string_view kRestartMessageId = "ID_RECOMP_RESTART_MESSAGE";
+constexpr std::string_view kRestartNowId = "ID_RECOMP_RESTART_NOW";
+constexpr std::string_view kRestartDiscardId = "ID_RECOMP_RESTART_DISCARD";
 
 // Same hash GetLocaleText (sub_825AA818) feeds the localizer.
 uint32_t LocaleHash(std::string_view id) {
@@ -149,6 +184,19 @@ int NearestIndex(const std::vector<double>& values, double value) {
     }
   }
   return best;
+}
+
+int ShownIndex(const Row& row) { return row.pending.value_or(row.get()); }
+
+bool HasPendingRestart() {
+  for (const Page& page : g_pages) {
+    for (const Row& row : page.rows) {
+      if (row.pending) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Rows for cvars this build lacks are skipped; the Add* helpers return null.
@@ -214,6 +262,23 @@ Row* AddStringChoice(Page& page, std::string title, std::string desc,
   return row;
 }
 
+// The overlay's restart-applied settings (SDK), keyed by id.
+using RestartSettings = std::unordered_map<std::string, rex::ui::RestartSetting>;
+
+Row* AddRestart(Page& page, const RestartSettings& settings, const std::string& id) {
+  const auto it = settings.find(id);
+  if (it == settings.end()) {
+    return nullptr;
+  }
+  const rex::ui::RestartSetting& setting = it->second;
+  Row* row = AddRow(page, setting.label, setting.desc + " Takes effect after a restart.");
+  row->labels = setting.options;
+  row->get = setting.current;
+  row->set = setting.apply;
+  row->restart = true;
+  return row;
+}
+
 bool NativeRendererActive() {
   return !HasCvar("skate3_native_render_scene") ||
          rex::cvar::Query<bool>("skate3_native_render_scene");
@@ -226,7 +291,16 @@ void NativeOnly(Row* row) {
   }
 }
 
-Page BuildGraphicsPage() {
+Page BuildDisplayPage(const RestartSettings& settings) {
+  Page page{"Display"};
+  for (const char* id : {"graphics_api", "graphics_device", "render_scale", "frame_cap",
+                         "aspect_ratio", "fullscreen", "monitor", "vsync", "tearing"}) {
+    AddRestart(page, settings, id);
+  }
+  return page;
+}
+
+Page BuildGraphicsPage(const RestartSettings& settings) {
   Page page{"Graphics"};
   // The renderer switch only exists on builds that can run the native path.
   if (HasCvar("skate3_native_render") && rex::cvar::Query<bool>("skate3_native_render")) {
@@ -238,6 +312,16 @@ Page BuildGraphicsPage() {
       row->rebuild_on_change = true;
     }
   }
+  NativeOnly(AddRestart(page, settings, "msaa"));
+  NativeOnly(AddRestart(page, settings, "shadow_quality"));
+  NativeOnly(AddToggle(page, "Enhanced Shadows",
+                       "Shadows from buildings and level geometry, not just characters.",
+                       {"skate3_native_render_scene_shadow_static_casters"}));
+  NativeOnly(AddRestart(page, settings, "static_shadow_res"));
+  NativeOnly(AddToggle(page, "PCSS Shadows",
+                       "Contact-hardening soft shadows: sharp near the caster, softer with "
+                       "distance.",
+                       {"skate3_native_render_scene_shadow_pcss"}));
   NativeOnly(AddToggle(page, "Ambient Occlusion",
                        "Soft contact shading where surfaces meet: under ledges, rails and "
                        "the skater.",
@@ -247,18 +331,11 @@ Page BuildGraphicsPage() {
   NativeOnly(AddToggle(page, "Volumetric Lighting",
                        "Sun shafts and directional haze that follow the time of day.",
                        {"skate3_native_render_scene_shafts", "skate3_native_render_scene_haze"}));
-  NativeOnly(AddToggle(page, "Enhanced Shadows",
-                       "Shadows from buildings and level geometry, not just characters.",
-                       {"skate3_native_render_scene_shadow_static_casters"}));
-  NativeOnly(AddToggle(page, "PCSS Shadows",
-                       "Contact-hardening soft shadows: sharp near the caster, softer with "
-                       "distance.",
-                       {"skate3_native_render_scene_shadow_pcss"}));
   return page;
 }
 
-Page BuildDisplayPage() {
-  Page page{"Display"};
+Page BuildViewPage() {
+  Page page{"View"};
   {
     std::vector<std::string> labels;
     std::vector<double> values;
@@ -286,8 +363,10 @@ Page BuildDisplayPage() {
   return page;
 }
 
-Page BuildControlsPage() {
+Page BuildControlsPage(const RestartSettings& settings) {
   Page page{"PC Controls"};
+  AddRestart(page, settings, "mnk_mode");
+  AddRestart(page, settings, "mnk_capture_mouse");
   {
     const std::vector<double> values = {0.25, 0.5, 0.75, 1.0, 1.25, 1.5,
                                         2.0,  2.5, 3.0,  4.0, 5.0};
@@ -301,6 +380,7 @@ Page BuildControlsPage() {
                     "Mouse-look speed while Mouse & Keyboard Mode is active.", std::move(labels),
                     values, {"mnk_sensitivity"});
   }
+  AddRestart(page, settings, "input_backend");
   AddStringChoice(page, "Settings Menu Shortcut",
                   "Controller button combination that opens the full PC settings.",
                   {"RB + Start", "LB + RB + Start", "Back + Start", "L3 + R3"},
@@ -308,9 +388,23 @@ Page BuildControlsPage() {
   return page;
 }
 
+Page BuildSystemPage(const RestartSettings& settings) {
+  Page page{"System"};
+  AddToggle(page, "Mute", "Silences all game audio.", {"audio_mute"});
+  AddRestart(page, settings, "audio_buffer");
+  AddRestart(page, settings, "language");
+  return page;
+}
+
 // Pages with rows each get a root row (in spare-id order), then the overlay.
 void BuildMenu() {
-  for (Page page : {BuildGraphicsPage(), BuildDisplayPage(), BuildControlsPage()}) {
+  RestartSettings settings;
+  for (auto& setting : rex::ui::GetRestartSettings()) {
+    std::string id = setting.id;
+    settings.emplace(std::move(id), std::move(setting));
+  }
+  for (Page page : {BuildDisplayPage(settings), BuildGraphicsPage(settings), BuildViewPage(),
+                    BuildControlsPage(settings), BuildSystemPage(settings)}) {
     if (page.rows.empty()) {
       continue;
     }
@@ -318,7 +412,7 @@ void BuildMenu() {
     g_pages.push_back(std::move(page));
   }
   g_root_rows.push_back({"All PC Settings", 0, -1});
-  static_assert(std::size(kSpareOptions) >= 4, "one spare option id per root row");
+  static_assert(std::size(kSpareOptions) >= 6, "one spare option id per root row");
   for (size_t i = 0; i < g_root_rows.size(); ++i) {
     g_root_rows[i].option_id = kSpareOptions[i].id;
   }
@@ -347,12 +441,26 @@ bool PublishStrings(rex::memory::Memory* memory, uint8_t* base) {
       }
     }
   }
+  // Popup strings: only their localized text is needed (the descriptor holds
+  // copies of the IDs).
+  const std::pair<std::string_view, std::string_view> popup_text[] = {
+      {kRestartTitleId, "Restart Required"},
+      {kRestartMessageId,
+       "Some changes take effect after Skate 3 restarts. Restart now to apply them?"},
+      {kRestartNowId, "Restart Now"},
+      {kRestartDiscardId, "Discard Changes"},
+  };
+  for (const auto& [id, text] : popup_text) {
+    entries.emplace_back(std::string(id), std::string(text));
+  }
+
   uint32_t size = 0;
   for (const auto& [id, text] : entries) {
     size += static_cast<uint32_t>(id.size() + text.size() + 2);
   }
   const uint32_t block = memory->SystemHeapAlloc(size);
-  if (!block) {
+  g_popup_desc = memory->SystemHeapAlloc(kPopupDescSize);
+  if (!block || !g_popup_desc) {
     return false;
   }
   uint32_t cursor = block;
@@ -405,6 +513,7 @@ uint32_t OptionTypeSlot(int32_t id) { return kOptionTable + id * 8 + 4; }
 
 bool ImageMatches(uint8_t* base) {
   if (!GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(kSelectorOptionId)), "selector") ||
+      !GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(kOptionTypeId)), "option") ||
       !GuestStringEquals(base, REX_LOAD_U32(OptionTitleSlot(kAudioOptionId)),
                          "ID_GAMESETTINGS_AUDIO_SETTINGS") ||
       !GuestStringEquals(base, kStringEmpty, "#")) {
@@ -412,7 +521,7 @@ bool ImageMatches(uint8_t* base) {
   }
   for (const SpareOption& spare : kSpareOptions) {
     if (!GuestStringEquals(base, REX_LOAD_U32(OptionTitleSlot(spare.id)), spare.title) ||
-        !GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(spare.id)), "option")) {
+        !GuestStringEquals(base, REX_LOAD_U32(OptionTypeSlot(spare.id)), spare.type)) {
       return false;
     }
     for (uint32_t slot = 0; slot < kScreenCount * kSlotsPerScreen; ++slot) {
@@ -518,14 +627,80 @@ void RefreshScreen(PPCContext& ctx, uint8_t* base, uint32_t state, uint32_t mode
   REX_CALL_INDIRECT_FUNC(function);
 }
 
+// Live rows apply and save immediately; restart rows only stage the choice.
 void StepRow(PPCContext& ctx, uint8_t* base, uint32_t state, Row& row, int delta) {
   PlaySound(ctx, base, delta < 0 ? kSelectorLeftSound : kSelectorRightSound);
   const int count = static_cast<int>(row.labels.size());
-  row.set(((row.get() + delta) % count + count) % count);
+  const int index = ((ShownIndex(row) + delta) % count + count) % count;
+  if (row.restart) {
+    if (index == row.get()) {
+      row.pending.reset();
+    } else {
+      row.pending = index;
+    }
+  } else {
+    row.set(index);
+    if (g_save_settings) {
+      g_save_settings();
+    }
+  }
+  RefreshScreen(ctx, base, state, row.rebuild_on_change ? kRefreshScreen : kRefreshValues);
+}
+
+void CopyGuestString(uint8_t* base, uint32_t address, std::string_view text) {
+  std::memcpy(base + address, text.data(), text.size());
+  base[address + text.size()] = 0;
+}
+
+// "Restart Required: Restart Now / Discard Changes", answered in the
+// sub_8260EA48 hook below.
+bool ShowRestartPrompt(PPCContext& ctx, uint8_t* base) {
+  const uint32_t manager = REX_LOAD_U32(kPopupManagerPtr);
+  if (manager < 0x10000) {
+    return false;
+  }
+  const uint32_t desc = g_popup_desc;
+  ctx.r3.u64 = desc;
+  sub_82D0B0B0(ctx, base);
+  CopyGuestString(base, desc + kPopupTitleOffset, kRestartTitleId);
+  CopyGuestString(base, desc + kPopupMessageOffset, kRestartMessageId);
+  REX_STORE_U32(desc + kPopupButtonCountOffset, 2);
+  CopyGuestString(base, desc + kPopupButtonOffsets[0], kRestartNowId);
+  CopyGuestString(base, desc + kPopupButtonOffsets[1], kRestartDiscardId);
+  REX_STORE_U32(desc + kPopupCallbackOffset, kPopupCallback);
+  g_restart_popup_open = true;
+  ctx.r3.u64 = manager;
+  ctx.r4.u64 = desc;
+  sub_82D0A8D0(ctx, base);
+  return true;
+}
+
+void ApplyPendingAndRestart() {
+  for (Page& page : g_pages) {
+    for (Row& row : page.rows) {
+      if (row.pending) {
+        row.set(*row.pending);
+        row.pending.reset();
+      }
+    }
+  }
+  REXLOG_INFO("Options menu: restart-required settings applied; restarting");
+  // Both marshal to the UI thread in order: the settings file is written
+  // before the restart relaunches the game.
   if (g_save_settings) {
     g_save_settings();
   }
-  RefreshScreen(ctx, base, state, row.rebuild_on_change ? kRefreshScreen : kRefreshValues);
+  if (g_restart) {
+    g_restart();
+  }
+}
+
+void DiscardPending() {
+  for (Page& page : g_pages) {
+    for (Row& row : page.rows) {
+      row.pending.reset();
+    }
+  }
 }
 
 // Native hooks run with no incoming register arguments, but the state lookup
@@ -555,6 +730,8 @@ void SetSaveSettingsCallback(std::function<void()> callback) {
   g_save_settings = std::move(callback);
 }
 
+void SetRestartCallback(std::function<void()> callback) { g_restart = std::move(callback); }
+
 void Install() {
 #if SKATE3_HAS_TITLE_UPDATE
   if (IsInstalled() || !REXCVAR_GET(skate3_options_menu_entry)) {
@@ -578,18 +755,25 @@ void Install() {
     return;
   }
   g_type_selector = REX_LOAD_U32(OptionTypeSlot(kSelectorOptionId));
+  g_type_option = REX_LOAD_U32(OptionTypeSlot(kOptionTypeId));
 
   for (size_t i = 0; i < g_root_rows.size(); ++i) {
     const RootRow& root = g_root_rows[i];
     REX_STORE_U32(OptionTitleSlot(root.option_id), root.title_id);
+    REX_STORE_U32(OptionTypeSlot(root.option_id), g_type_option);
     for (uint32_t screen : kRootScreens) {
       REX_STORE_U32(LayoutSlot(screen, static_cast<uint32_t>(std::size(kRootLayout) + i)),
                     static_cast<uint32_t>(root.option_id));
     }
   }
   g_installed.store(true, std::memory_order_release);
-  REXLOG_INFO("Options menu: {} PC settings rows added to the root Options screen",
-              g_root_rows.size());
+  size_t rows = 0;
+  for (const Page& page : g_pages) {
+    rows += page.rows.size();
+  }
+  REXLOG_INFO("Options menu: {} PC settings rows ({} pages, {} settings) added to the root "
+              "Options screen",
+              g_root_rows.size(), g_pages.size(), rows);
 #endif
 }
 
@@ -608,6 +792,29 @@ extern "C" REX_FUNC(sub_8290C1C0) {
     }
   }
   __imp__sub_8290C1C0(ctx, base);
+}
+
+// Popup result callback (r4 = button index). Owned by the Options screen's
+// Video Calibration popup; answers for the restart prompt while it is open.
+extern "C" REX_FUNC(sub_8260EA48) {
+  if (IsInstalled() && g_restart_popup_open) {
+    g_restart_popup_open = false;
+    if (ctx.r4.u32 == 0) {
+      ApplyPendingAndRestart();
+      return;
+    }
+    // Discard Changes: drop the staged choices and finish the Back the
+    // prompt interrupted (the root Options screen).
+    DiscardPending();
+    const uint32_t state = OptionsState(ctx, base);
+    if (PageOf(base, state)) {
+      PlaySound(ctx, base, kBackSound);
+      ctx.r3.u64 = state;
+      sub_8260D078(ctx, base);
+    }
+    return;
+  }
+  __imp__sub_8260EA48(ctx, base);
 }
 
 // ---- FrontEndState_Options methods (r3 = state) -------------------------------
@@ -635,26 +842,30 @@ extern "C" REX_FUNC(sub_8260D290) {
   __imp__sub_8260D290(ctx, base);
 }
 
-// Input handler (r5 = event). On our pages left/right step selectors and Back
-// keeps the game's handling (the root Options screen); nothing else is
-// consumed, so the game never indexes its tables with a page's screen id.
+// Input handler (r5 = event). On our pages left/right step selectors, and
+// Back either prompts to restart (staged restart-required changes) or keeps
+// the game's handling (the root Options screen). Nothing else is consumed, so
+// the game never indexes its tables with a page's screen id.
 extern "C" REX_FUNC(sub_8260C258) {
   if (IsInstalled()) {
     const uint32_t state = ctx.r3.u32;
     const uint32_t event = ctx.r5.u32;
-    if (event == kInputLeft || event == kInputRight) {
-      if (Page* page = PageOf(base, state)) {
-        Row* row = RowAt(*page, REX_LOAD_U32(state + kStateRowOffset));
-        if (row && RowEnabled(*row)) {
-          StepRow(ctx, base, state, *row, event == kInputLeft ? -1 : 1);
+    if (Page* page = PageOf(base, state)) {
+      if (event == kInputBack) {
+        if (HasPendingRestart() && ShowRestartPrompt(ctx, base)) {
           ctx.r3.u64 = 1;
-        } else {
-          ctx.r3.u64 = 0;
+          return;
         }
+        __imp__sub_8260C258(ctx, base);
         return;
       }
-    } else if (PageOf(base, state) && event != kInputBack) {
-      ctx.r3.u64 = 0;
+      Row* row = RowAt(*page, REX_LOAD_U32(state + kStateRowOffset));
+      if ((event == kInputLeft || event == kInputRight) && row && RowEnabled(*row)) {
+        StepRow(ctx, base, state, *row, event == kInputLeft ? -1 : 1);
+        ctx.r3.u64 = 1;
+      } else {
+        ctx.r3.u64 = 0;
+      }
       return;
     }
   }
@@ -673,12 +884,12 @@ extern "C" REX_FUNC(sub_8260D718) {
   __imp__sub_8260D718(ctx, base);
 }
 
-// Row integer value (r4 = row): the selected label index.
+// Row integer value (r4 = row): the shown label index.
 extern "C" REX_FUNC(sub_8260D7E8) {
   if (IsInstalled()) {
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
-      ctx.r3.s64 = row ? row->get() : 0;
+      ctx.r3.s64 = row ? ShownIndex(*row) : 0;
       return;
     }
   }
@@ -690,7 +901,7 @@ extern "C" REX_FUNC(sub_8260D968) {
   if (IsInstalled()) {
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
-      ctx.r3.u64 = row ? row->label_ids[row->get()] : kStringEmpty;
+      ctx.r3.u64 = row ? row->label_ids[ShownIndex(*row)] : kStringEmpty;
       return;
     }
   }

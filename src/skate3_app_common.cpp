@@ -807,9 +807,10 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
-  // PC settings rows in the game's Options screen. Both callbacks arrive on
-  // the guest thread: open (never toggle closed) the overlay and persist row
-  // changes on the UI thread.
+  // PC settings rows in the game's Options screen. The callbacks arrive on
+  // the guest thread: open (never toggle closed) the overlay, persist row
+  // changes and restart on the UI thread (RestartGame defers itself, so it
+  // runs after a save queued just before it).
   skate3::options_menu::SetOpenSettingsCallback([this]() {
     app_context().CallInUIThreadDeferred([this]() {
       if (!simple_settings_dialog_ || !simple_settings_dialog_->visible()) {
@@ -821,6 +822,7 @@ void Skate3BaseApp::OnPostSetup() {
     app_context().CallInUIThreadDeferred(
         [this]() { rex::ui::SaveSimpleSettingsConfig(user_settings_path_); });
   });
+  skate3::options_menu::SetRestartCallback([this]() { RestartGame(); });
   skate3::options_menu::Install();
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
