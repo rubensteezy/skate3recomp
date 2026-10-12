@@ -261,6 +261,7 @@ The release artifacts are:
 ```text
 out/build/linux-release/skate3
 out/build/linux-release/librexruntime.so
+out/build/linux-release/librexgpu-xenos.so
 ```
 
 ## macOS Build (Apple Silicon)
@@ -283,8 +284,9 @@ cmake --preset macos-release -DSKATE3_GAME_DATA_ROOT="$PWD/game"
 cmake --build --preset macos-release --parallel
 ```
 
-The release artifacts are `out/build/macos-release/skate3` and
-`librexruntime.dylib`, plus the MoltenVK library and ICD manifest beside them.
+The release artifacts are `out/build/macos-release/skate3`,
+`librexruntime.dylib` and `librexgpu-xenos.dylib`, plus the MoltenVK library and
+ICD manifest beside them.
 
 ## Running a Development Build
 

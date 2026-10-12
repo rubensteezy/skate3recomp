@@ -12,9 +12,10 @@ endif()
 function(_skate3_add_include _contents_var _include)
   set(_contents "${${_contents_var}}")
   if(NOT _contents MATCHES "#include \"${_include}\"")
-    string(REPLACE
-      "#include \"skate3_init.h\"\n"
-      "#include \"skate3_init.h\"\n#include \"${_include}\"\n"
+    # Each recompiled source starts by including its own declarations header.
+    string(REGEX REPLACE
+      "(#include \"skate3_funcs\\.[0-9]+\\.h\"\n)"
+      "\\1#include \"${_include}\"\n"
       _contents
       "${_contents}")
   endif()
