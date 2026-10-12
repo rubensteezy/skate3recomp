@@ -5,9 +5,10 @@
 #   tools/package_macos.sh [build-dir] [version]
 #
 # build-dir defaults to out/build/macos-release. version defaults to the
-# exact v* tag on HEAD. The bundle is skate3recomp.app with everything the
-# build stages next to the executable (runtime and GPU plugin dylibs and the
-# vulkan folder) in Contents/MacOS, ad-hoc signed. The zip is written to
+# exact v* tag on HEAD. The bundle is skate3recomp.app with the code the build
+# stages next to the executable (runtime and GPU plugin dylibs and vulkan/lib)
+# in Contents/MacOS and the MoltenVK ICD manifest in
+# Contents/Resources/vulkan/icd.d, ad-hoc signed. The zip is written to
 # out/release.
 
 set -eu
@@ -19,7 +20,8 @@ if [ -z "$version" ]; then
     echo "package_macos: HEAD has no v* tag; pass the version as the second argument" >&2
     exit 1
 fi
-for f in skate3 librexruntime.dylib librexgpu-xenos.dylib vulkan; do
+for f in skate3 librexruntime.dylib librexgpu-xenos.dylib vulkan/lib/libvulkan.1.dylib \
+        vulkan/lib/libMoltenVK.dylib vulkan/share/vulkan/icd.d/MoltenVK_icd.json; do
     if [ ! -e "$build_dir/$f" ]; then
         echo "package_macos: $build_dir/$f is missing; build the macos-release preset first" >&2
         exit 1
@@ -34,6 +36,19 @@ mkdir -p "$app/Contents/MacOS"
 cp "$build_dir/skate3" "$build_dir/librexruntime.dylib" "$build_dir/librexgpu-xenos.dylib" \
     "$app/Contents/MacOS/"
 cp -R "$build_dir/vulkan" "$app/Contents/MacOS/"
+# codesign treats every folder under Contents/MacOS as nested code, so the
+# MoltenVK ICD manifest (data only) moves to Resources, where the runtime also
+# looks for it, with its library_path pointed back at the bundled dylib.
+icd=vulkan/share/vulkan/icd.d/MoltenVK_icd.json
+rm -rf "$app/Contents/MacOS/vulkan/share"
+mkdir -p "$app/Contents/Resources/vulkan/icd.d"
+sed 's|"\.\./\.\./\.\./lib/|"../../../MacOS/vulkan/lib/|' "$build_dir/$icd" \
+    > "$app/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
+if ! grep -q '"../../../MacOS/vulkan/lib/libMoltenVK.dylib"' \
+        "$app/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"; then
+    echo "package_macos: unexpected library_path in $build_dir/$icd" >&2
+    exit 1
+fi
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
