@@ -102,8 +102,8 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_ropa_blend);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_ropa_inline);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_selection_outline);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_shadow_caster_parity);
-REXCVAR_DECLARE(bool, skate3_native_render_scene_shadow_pcss);
-REXCVAR_DECLARE(bool, skate3_native_render_scene_shadow_static_casters);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_experimental_pcss);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_experimental_static_shadows);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_pcss_blocker_m);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_pcss_max_m);
 REXCVAR_DECLARE(double, skate3_native_render_scene_shadow_pcss_min_texel);
@@ -3942,7 +3942,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
     g_r.nsm_built_radius = 0.0f;
   }
   if (!g_r.static_sun && g_r.shadow_raw != nullptr &&
-      REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      REXCVAR_GET(skate3_native_render_scene_experimental_static_shadows)) {
     // Native static sun-shadow map (see RendererState). THREE cascade
     // tiles side by side: inner (r/6, centimeter contact detail with
     // useful reach), mid (r/2) and far (full radius, large-caster
@@ -6404,7 +6404,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
       g_r.pso_shadow_caster_clip == nullptr || debug_mode != 0 ||
       !scene.shadow_valid ||
       !REXCVAR_GET(skate3_native_render_scene_shadows) ||
-      !REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      !REXCVAR_GET(skate3_native_render_scene_experimental_static_shadows)) {
     return;
   }
   // Sun axis = the material sun (c6). It is the only sun-like direction
@@ -8314,7 +8314,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // shares the angular knobs even on frames with no dynamic casters.
     if (scene.shadow_valid) {
       cb[136] =
-          REXCVAR_GET(skate3_native_render_scene_shadow_pcss) ? 1.0f : 0.0f;
+          REXCVAR_GET(skate3_native_render_scene_experimental_pcss) ? 1.0f : 0.0f;
       cb[137] = std::tan(
           0.5f * 0.01745329f *
           float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_sun_deg)));
