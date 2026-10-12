@@ -48,7 +48,7 @@ cbuffer CH : register(b2) {
   float4 ch_sh[9];  // SH irradiance rows, pre-scaled (see capture);
                     // vehicles keep spec color + power in row 0 instead
   float4 ch_tintA;  // CAC diffuse tint / livingworld red-mask tint (w = apply)
-  float4 ch_tintB;  // livingworld blue-mask tint / hair fresnel tint (w = strand-alpha scale)
+  float4 ch_tintB;  // livingworld blue-mask tint / hair highlight tint (w = strand-alpha scale)
   float4 ch_misc;   // x = alpha out, y = family, z = lens-alpha flag,
                     // w = rim fresnel power
   float4 ch_ks;     // rgb = key spec color, w = power (0 = spec rows absent)

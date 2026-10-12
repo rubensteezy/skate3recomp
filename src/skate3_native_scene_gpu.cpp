@@ -124,6 +124,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_ssao_full_res);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_ssr);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_mips);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_revalidate);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_confirm);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_transparents);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_world_v2);
 REXCVAR_DECLARE(double, skate3_menu_blur_sigma);
@@ -2227,6 +2228,9 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
 
   t.upload_flip = !t.upload_flip;
   t.payload_fp = fp;
+  t.pending_payload_fp = 0;
+  t.pending_payload_polls = 0;
+  t.changed_payload_polls = 0;
   t.near_black = SampleProbeNearBlack(base, t);
   t.recheck_frame = 0;
   return true;
@@ -8836,7 +8840,64 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                  : (g_in_menus_frame.load(std::memory_order_relaxed) ? 2ull
                                                                      : 16ull));
         const uint64_t fp = SampleProbeFingerprint(base, e);
-        const bool fp_new = fp != 0 && fp != e.payload_fp;
+        const bool fp_changed = fp != 0 && fp != e.payload_fp;
+        bool fp_new = fp_changed;
+        if (!fp_changed) {
+          if (fp != 0 && e.pending_payload_polls != 0) {
+            // A candidate came and went with the cached payload back in
+            // place: without confirmation this was a decode of mid-stream
+            // content and a re-decode back (one visible flicker).
+            static std::atomic<uint64_t> s_suppressed{0};
+            const uint64_t n = s_suppressed.fetch_add(1) + 1;
+            if (n <= 64 || (n & (n - 1)) == 0) {
+              REXLOG_INFO(
+                  "native-scene: texture flicker suppressed key={:016X} "
+                  "(transient payload {:016X}, {} total)",
+                  route.key, e.pending_payload_fp, n);
+            }
+          }
+          e.pending_payload_fp = 0;
+          e.pending_payload_polls = 0;
+          e.changed_payload_polls = 0;
+        } else if (REXCVAR_GET(skate3_native_render_scene_tex_confirm)) {
+          // Change confirmation: the guest streams IN PLACE with no
+          // CPU-visible event, so one changed sample is often a mid-write
+          // snapshot; decoding it swapped valid content for a torn or
+          // intermediate image and back (the streaming texture flicker the
+          // re-decode diagnostic below counts). Replace only once the SAME
+          // new fingerprint is sampled twice, re-polling 2 frames later so
+          // a finished stream still lands promptly. Content that never
+          // holds still (four changed polls in a row, any candidates) is
+          // accepted anyway rather than frozen on its old decode.
+          if (e.pending_payload_fp == fp) {
+            if (e.pending_payload_polls < 2) {
+              ++e.pending_payload_polls;
+            }
+          } else {
+            if (e.pending_payload_fp != 0) {
+              // The previous candidate was superseded before confirming: an
+              // intermediate (partially written) payload that the old path
+              // decoded and showed (solid colors / stale layers).
+              static std::atomic<uint64_t> s_superseded{0};
+              const uint64_t n = s_superseded.fetch_add(1) + 1;
+              if (n <= 64 || (n & (n - 1)) == 0) {
+                REXLOG_INFO(
+                    "native-scene: texture intermediate skipped key={:016X} "
+                    "(transient payload {:016X}, {} total)",
+                    route.key, e.pending_payload_fp, n);
+              }
+            }
+            e.pending_payload_fp = fp;
+            e.pending_payload_polls = 1;
+          }
+          if (e.changed_payload_polls < 4) {
+            ++e.changed_payload_polls;
+          }
+          fp_new = e.pending_payload_polls >= 2 || e.changed_payload_polls >= 4;
+          if (!fp_new) {
+            e.recheck_frame = std::min(e.recheck_frame, frame_number + 2);
+          }
+        }
         if (trm) {
           REXLOG_INFO(
               "tex-trace: f{} obj={:08X} poll key={:016X} fp={:016X} "
@@ -8916,8 +8977,40 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         return t;
       }
       const uint64_t skey = (uint64_t(item.mesh) << 3) | slot;
+      // Piece signature: the shading class plus the geometry's total index
+      // count. A world mesh's material-detail demote keeps its geometry
+      // (same signature: the hold below still applies); a recycled mesh
+      // address now carrying a different piece does not.
+      uint64_t piece = (uint64_t(item.char_family) << 1) |
+                       (uint64_t(item.hair) << 4) | (uint64_t(item.char_alpha) << 5) |
+                       (uint64_t(item.ropa) << 6) | 1u;
+      {
+        uint64_t indices = 0;
+        for (const DrawEntry& d : item.draws) {
+          indices += d.index_count;
+        }
+        // No geometry yet (draws not populated this frame): the piece is
+        // unknown, neither compared nor stamped, so a transiently empty
+        // item never cancels its own legitimate hold.
+        piece = indices != 0 ? (piece | (indices << 8)) : 0;
+      }
+      const auto drop_foreign_site = [&](RendererState::TexStickySite& site) {
+        if (piece == 0 || site.piece == 0 || site.piece == piece ||
+            site.words_key == 0) {
+          return;
+        }
+        static std::atomic<uint32_t> s_foreign_logs{0};
+        if (s_foreign_logs.fetch_add(1, std::memory_order_relaxed) < 24) {
+          REXLOG_INFO(
+              "native-scene: texture hold dropped: mesh={:08X} slot={} now "
+              "carries a different piece (sig {:X} -> {:X}, fam {})",
+              item.mesh, slot, site.piece, piece, item.char_family);
+        }
+        site = RendererState::TexStickySite{};
+      };
       if (t != &g_r.white) {
         RendererState::TexStickySite& site = g_r.tex_sticky[skey];
+        drop_foreign_site(site);
         // Material-detail downgrade hold: the game's streaming demotes a
         // nearby mesh to its UN (undetailed) material for a fraction of a
         // second and back, the visible flash to completely different/
@@ -8982,6 +9075,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         site.words_key = cur_key;
         site.area = cur_area;
         site.downgrade_since = 0;
+        if (piece != 0) {
+          site.piece = piece;
+        }
         if (!g_r.tex_pending_first.empty()) {
           g_r.tex_pending_first.erase(tex_ptr);
         }
@@ -8992,6 +9088,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // previous art from the store, the console's own mip-transition
         // look instead of a white flash.
         const auto sit = g_r.tex_sticky.find(skey);
+        if (sit != g_r.tex_sticky.end()) {
+          drop_foreign_site(sit->second);
+        }
         if (sit != g_r.tex_sticky.end() && sit->second.words_key != 0) {
           const auto old = g_r.tex_store.find(sit->second.words_key);
           if (old != g_r.tex_store.end() && old->second.valid) {

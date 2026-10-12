@@ -6,6 +6,7 @@
 #include "skate3_iso_installer.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
+#include "skate3_options_menu.h"
 #include "skate3_screenshot.h"
 #include "skate3_shader_disasm.h"
 #include "skate3_win_icon.h"
@@ -805,6 +806,23 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
+  // PC settings rows in the game's Options screen. The callbacks arrive on
+  // the guest thread: open (never toggle closed) the overlay, persist row
+  // changes and restart on the UI thread (RestartGame defers itself, so it
+  // runs after a save queued just before it).
+  skate3::options_menu::SetOpenSettingsCallback([this]() {
+    app_context().CallInUIThreadDeferred([this]() {
+      if (!simple_settings_dialog_ || !simple_settings_dialog_->visible()) {
+        ToggleSimpleSettings();
+      }
+    });
+  });
+  skate3::options_menu::SetSaveSettingsCallback([this]() {
+    app_context().CallInUIThreadDeferred(
+        [this]() { rex::ui::SaveSimpleSettingsConfig(user_settings_path_); });
+  });
+  skate3::options_menu::SetRestartCallback([this]() { RestartGame(); });
+  skate3::options_menu::Install();
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
                                           eawebkit_PPCImageConfig.image_base,
