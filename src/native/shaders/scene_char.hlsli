@@ -79,7 +79,16 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     // - alpha-blended in the sorted sub-pass (hair drawn opaque is the
     // blocky-helmet look).
     float hs;
+    float wsh = 1.0;
     if (fam < 4.5) {
+      // cac_hair's world-shadow receive (shadowWorld tf1, 4-tap bilinear
+      // PCF floored by g_CSMSelfBias.w) multiplies the wrapped key AND the
+      // strand highlight, never the ambient; the hair shader samples no
+      // CSM cascade. The native static sun map stands in for shadowWorld,
+      // as on the fam-1/2 branch (its strength floor replaces c3.w there
+      // too). Without it the hair stayed fully sunlit under awnings and
+      // in building shade while the face and body beneath went dark.
+      wsh = SampleStaticSun(i.rpos + cam_pos.xyz, cn, i.pos.xy);
       // cac_hair_defaultPS (the player / create-a-skater hair) is a
       // Kajiya-Kay strand highlight: sin(T, H)^c11.w along the usage-6
       // vertex tangent, H = normalize(V + L). The skinned layout carries
@@ -94,8 +103,8 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     } else {
       hs = pow(1.0 - saturate(dot(cn, vd)), max(ch_light.w, 1.0));
     }
-    float3 hl = ch_key.rgb * (saturate(ndl * 0.75 + 0.25) + ch_amb.w) +
-                ch_tintB.rgb * hs * saturate(ndl * 1.75 + 0.25);
+    float3 hl = ch_key.rgb * (saturate(ndl * 0.75 + 0.25) * wsh + ch_amb.w) +
+                ch_tintB.rgb * hs * saturate(ndl * 1.75 + 0.25) * wsh;
     lin = dlin * hl;
     out_a = saturate(decal_art.Sample(smp, i.uv2).r * ch_tintB.w);
   } else if (fam > 2.5) {
