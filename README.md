@@ -46,7 +46,8 @@ Notes:
 - The Windows version is the most tested, followed by Linux, and then macOS.
 - On some hardware configurations, you may have a better experience running the Windows version through a translation layer like Proton rather than the native Linux build itself.
 - The macOS ARM build is experimental and more prone to issues.
-- Releases are published on this fork's [releases page](https://github.com/rubensteezy/skate3recomp/releases). There is no Linux release from this fork yet: [build from source](#building-from-source), or use the last Linux release (v2.0.2) on the [original repository's releases page](https://github.com/mchughalex/skate3recomp/releases), which works but does not include this fork's fixes.
+- The Linux release is built on Ubuntu 24.04 and needs glibc 2.38 or newer. On older distributions, [build from source](#building-from-source).
+- Releases are published on this fork's [releases page](https://github.com/rubensteezy/skate3recomp/releases).
 
 ### Windows
 
@@ -59,7 +60,7 @@ Notes:
 
 ### Linux
 
-1. Download Skate3Recomp-Linux.zip from the [original repository's releases page](https://github.com/mchughalex/skate3recomp/releases) (v2.0.2), or build from source.
+1. Download the latest release Skate3Recomp-Linux.zip from the [releases page](https://github.com/rubensteezy/skate3recomp/releases).
 2. Extract it anywhere you like, to a folder you control.
 3. Run skate3.
 4. Click "Select ISO" to select your legally obtained copy of Skate 3.
@@ -201,10 +202,10 @@ cmake --build --preset relwithdebinfo --parallel
 For release packaging, use the `release` preset on Windows, the
 `linux-release` preset on Linux, or the `macos-release` preset on macOS.
 Build from the release tag so the version comes out right, then run
-`powershell -File tools/package_windows.ps1` on Windows or
-`tools/package_macos.sh` on macOS. Each writes the release zip to
-`out/release`; the macOS script wraps the build in an ad-hoc signed
-`skate3recomp.app`.
+`powershell -File tools/package_windows.ps1` on Windows,
+`tools/package_linux.sh` on Linux, or `tools/package_macos.sh` on macOS.
+Each writes the release zip to `out/release`; the macOS script wraps the
+build in an ad-hoc signed `skate3recomp.app`.
 
 The native renderer's HLSL sources live in `src/native/shaders` and are
 embedded into the build automatically. The matching Vulkan SPIR-V binaries are
