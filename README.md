@@ -81,7 +81,6 @@ Since v2.0.0 the game no longer relies on emulating the Xbox 360 GPU. A native r
 
 Known issues:
 
-- Occasional texture and asset pop-in or brief flicker while streaming quickly around the map (also present in the emulated renderer)
 - Skate parks and park editing currently have some general visual parity / rendering issues
 
 ## Installing DLC
