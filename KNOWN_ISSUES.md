@@ -1064,6 +1064,60 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** switch both queues to `std::deque` if a profile shows lock
   contention. Turn the null re-queue into a plain wait.
 
+### KI-87: Raw guest loads in the `CaptureDynamicState` pre-check
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-64 (#48). The biggest remaining
+  risk of the KI-64 kind.
+- **Where:** the world-path pre-check of `CaptureDynamicState` in
+  `src/skate3_native_scene.cpp`, called about 800 times a frame from
+  `OnSceneDrawList`. It reads `ctx → record → mesh → vdesc` and the vertex
+  elements raw (`REX_LOAD_U32(ctx)`, `REX_LOAD_U32(record)`,
+  `REX_LOAD_U16(vdesc + 8)` and others). Further down, `ctx + kCtxEffectList`
+  and `effect_list + kEffectListPassCount` are raw too.
+- **Problem:** a stale pointer there crashes the guest render thread, the same
+  way as KI-64.
+- **Fix:** reuse one ctx-head guarded copy, as #48's `BuildItemGeometry` does,
+  and measure the cost the same way #48 did.
+
+### KI-88: Remaining raw guest loads elsewhere in capture (low risk)
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-64 (#48).
+- **Where** (`src/skate3_native_scene.cpp` unless noted):
+  - `CaptureClothDraw`: `vb_obj + 0x18/0x20`.
+  - The neighbour read in `ComputeItemFingerprint`:
+    `mix(REX_LOAD_U64(addr + off))`.
+  - `OnSetViewport` and `OnSetScissor`.
+  - The `REX_LOAD_U8(obj + 0x54 + k)` shader-name loops.
+  - The `device + 0x480` fetch-constant reads.
+- **Problem:** the same fault risk as KI-64, but most of these read device or
+  current-draw state, so the risk is low.
+- **Also:**
+  - `GuestReadableApprox` only checks `addr >= 0x10000` (its `base` argument
+    is unused), but its name suggests a real readability check.
+  - `OnSceneDrawList` and `FilterSceneDrawList` (`src/skate3_native_render.cpp`)
+    both copy the same sort-list segment per dispatch. The cost is
+    negligible.
+- **Next step:** no code change until a crash points at one of these. Rename or
+  document `GuestReadableApprox`. Optionally, pass the captured segment to
+  the filter.
+
+### KI-89: Raw writes through just-read pointers in the auto-exposure hook
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-64 (#48).
+- **Where:** `sub_827F0D00` in `src/skate3_native_render.cpp`:
+  `REX_STORE_U32(inst_a + 48 / inst_b + 56)`.
+- **Problem:** these write through pointers read a moment earlier. A stale
+  instance pointer would be a write fault, or would corrupt guest memory if
+  the page has been reused.
+- **Next step:** low priority. Check `inst_a` / `inst_b` against a guarded read
+  of their vtable or type before the stores.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
