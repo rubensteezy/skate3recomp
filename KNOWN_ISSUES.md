@@ -428,7 +428,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
-- **Status:** fixed in rubensteezy/skate3recomp#PRNUM · was BT-26
+- **Status:** fixed in rubensteezy/skate3recomp#27 · was BT-26
 - **Problem:** the game hooks use hard-coded guest addresses that are only
   correct in the Title Update 3 image, but the build still allowed codegen
   from the unpatched retail image. Release builds were never affected: they
