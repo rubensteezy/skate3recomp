@@ -112,6 +112,19 @@ constexpr uint32_t kPopupMessageOffset = 128;  // char[256]
 constexpr uint32_t kPopupButtonCountOffset = 384;
 constexpr uint32_t kPopupButtonOffsets[] = {388, 516};  // char[128] each
 constexpr uint32_t kPopupCallbackOffset = 1412;
+// The manager keeps the shown popups (its own 1452-byte copies of the
+// descriptors) in a vector of pointers at +112 (begin) / +116 (end); each copy
+// carries the id sub_82D0A8D0 returned at +1428. Every path that answers a
+// popup passes that id to its callback in r3: a button press (sub_825EF698,
+// r4 = button index) and the manager flushing its popups (sub_82D0A738,
+// r4 = -2). Ids come from an ever-increasing counter, so a stale one never
+// matches a later popup. A screen can also close a popup by id without any
+// callback (sub_82D0A628).
+constexpr uint32_t kPopupQueueBeginOffset = 112;
+constexpr uint32_t kPopupQueueEndOffset = 116;
+constexpr uint32_t kPopupIdOffset = 1428;
+constexpr uint32_t kPopupQueueMax = 64;  // sanity bound for the queue walk
+constexpr int32_t kNoPopup = -1;         // the descriptor's own "no id" value
 // The Options screen's own Video Calibration popup callback; hooked below and
 // answered for our popup while it is open.
 constexpr uint32_t kPopupCallback = 0x8260EA48;
@@ -155,7 +168,11 @@ std::unordered_map<uint32_t, uint32_t> g_locale;  // ID hash -> guest text
 uint32_t g_type_selector = 0;
 uint32_t g_type_option = 0;
 uint32_t g_popup_desc = 0;
-bool g_restart_popup_open = false;  // guest thread only
+// Id of the last restart prompt we showed, or kNoPopup. Only an identity: the
+// popup manager's queue says whether that popup is still open, so no path
+// that closes it (a button, a flush, a screen closing it by id) can leave a
+// stale "open" state behind.
+int32_t g_restart_popup_id = kNoPopup;  // guest thread only
 
 // String IDs of the restart prompt (copied into the popup descriptor).
 constexpr std::string_view kRestartTitleId = "ID_RECOMP_RESTART_TITLE";
@@ -187,6 +204,16 @@ int NearestIndex(const std::vector<double>& values, double value) {
 }
 
 int ShownIndex(const Row& row) { return row.pending.value_or(row.get()); }
+
+// The shown label, or null for a row without labels or whose getter answers
+// out of range (the table getters then show nothing instead of indexing).
+std::optional<int> ShownLabel(const Row& row) {
+  const int index = ShownIndex(row);
+  if (index < 0 || index >= static_cast<int>(row.labels.size())) {
+    return std::nullopt;
+  }
+  return index;
+}
 
 bool HasPendingRestart() {
   for (const Page& page : g_pages) {
@@ -237,6 +264,9 @@ Row* AddNumberChoice(Page& page, std::string title, std::string desc,
     return NearestIndex(values, rex::cvar::Query<double>(cvars.front()));
   };
   row->set = [values, cvars](int index) {
+    if (index < 0 || index >= static_cast<int>(values.size())) {
+      return;
+    }
     const std::string text = std::to_string(values[index]);
     for (const auto& name : cvars) {
       rex::cvar::SetFlagByName(name, text);
@@ -258,7 +288,11 @@ Row* AddStringChoice(Page& page, std::string title, std::string desc,
     const auto it = std::find(values.begin(), values.end(), current);
     return it != values.end() ? static_cast<int>(it - values.begin()) : 0;
   };
-  row->set = [values, cvar](int index) { rex::cvar::SetFlagByName(cvar, values[index]); };
+  row->set = [values, cvar](int index) {
+    if (index >= 0 && index < static_cast<int>(values.size())) {
+      rex::cvar::SetFlagByName(cvar, values[index]);
+    }
+  };
   return row;
 }
 
@@ -619,11 +653,23 @@ void RefreshScreen(PPCContext& ctx, uint8_t* base, uint32_t state, uint32_t mode
   REX_CALL_INDIRECT_FUNC(function);
 }
 
+// The label `delta` steps from `shown`, wrapping around; -1 for no labels.
+int SteppedIndex(int shown, int delta, int count) {
+  if (count <= 0) {
+    return -1;
+  }
+  const int64_t wrapped = (static_cast<int64_t>(shown) + delta) % count;
+  return static_cast<int>(wrapped < 0 ? wrapped + count : wrapped);
+}
+
 // Live rows apply and save immediately; restart rows only stage the choice.
-void StepRow(PPCContext& ctx, uint8_t* base, uint32_t state, Row& row, int delta) {
+// A row without labels has nothing to step to: no sound, no change.
+bool StepRow(PPCContext& ctx, uint8_t* base, uint32_t state, Row& row, int delta) {
+  const int index = SteppedIndex(ShownIndex(row), delta, static_cast<int>(row.labels.size()));
+  if (index < 0) {
+    return false;
+  }
   PlaySound(ctx, base, delta < 0 ? kSelectorLeftSound : kSelectorRightSound);
-  const int count = static_cast<int>(row.labels.size());
-  const int index = ((ShownIndex(row) + delta) % count + count) % count;
   if (row.restart) {
     if (index == row.get()) {
       row.pending.reset();
@@ -637,6 +683,7 @@ void StepRow(PPCContext& ctx, uint8_t* base, uint32_t state, Row& row, int delta
     }
   }
   RefreshScreen(ctx, base, state, row.rebuild_on_change ? kRefreshScreen : kRefreshValues);
+  return true;
 }
 
 void CopyGuestString(uint8_t* base, uint32_t address, std::string_view text) {
@@ -644,9 +691,36 @@ void CopyGuestString(uint8_t* base, uint32_t address, std::string_view text) {
   base[address + text.size()] = 0;
 }
 
+// Whether the popup manager still shows the popup with this id.
+bool PopupShown(uint8_t* base, int32_t id) {
+  if (id == kNoPopup) {
+    return false;
+  }
+  const uint32_t manager = REX_LOAD_U32(kPopupManagerPtr);
+  if (manager < 0x10000) {
+    return false;
+  }
+  const uint32_t begin = REX_LOAD_U32(manager + kPopupQueueBeginOffset);
+  const uint32_t end = REX_LOAD_U32(manager + kPopupQueueEndOffset);
+  if (begin < 0x10000 || end < begin || end - begin > kPopupQueueMax * 4) {
+    return false;
+  }
+  for (uint32_t slot = begin; slot < end; slot += 4) {
+    const uint32_t popup = REX_LOAD_U32(slot);
+    if (popup >= 0x10000 && static_cast<int32_t>(REX_LOAD_U32(popup + kPopupIdOffset)) == id) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // "Restart Required: Restart Now / Discard Changes", answered in the
-// sub_8260EA48 hook below.
+// sub_8260EA48 hook below. Returns true when the prompt is up (already shown
+// or shown now).
 bool ShowRestartPrompt(PPCContext& ctx, uint8_t* base) {
+  if (PopupShown(base, g_restart_popup_id)) {
+    return true;
+  }
   const uint32_t manager = REX_LOAD_U32(kPopupManagerPtr);
   if (manager < 0x10000) {
     return false;
@@ -660,10 +734,11 @@ bool ShowRestartPrompt(PPCContext& ctx, uint8_t* base) {
   CopyGuestString(base, desc + kPopupButtonOffsets[0], kRestartNowId);
   CopyGuestString(base, desc + kPopupButtonOffsets[1], kRestartDiscardId);
   REX_STORE_U32(desc + kPopupCallbackOffset, kPopupCallback);
-  g_restart_popup_open = true;
   ctx.r3.u64 = manager;
   ctx.r4.u64 = desc;
   sub_82D0A8D0(ctx, base);
+  g_restart_popup_id = ctx.r3.s32;  // the new popup's id
+  REXLOG_INFO("Options menu: restart prompt shown (popup {})", g_restart_popup_id);
   return true;
 }
 
@@ -786,24 +861,33 @@ extern "C" REX_FUNC(sub_8290C1C0) {
   __imp__sub_8290C1C0(ctx, base);
 }
 
-// Popup result callback (r4 = button index). Owned by the Options screen's
-// Video Calibration popup; answers for the restart prompt while it is open.
+// Popup result callback (r3 = popup id, r4 = button index or -2 when the
+// manager flushes its popups). Owned by the Options screen's Video
+// Calibration popup; answers only for the restart prompt's own id, so any
+// other popup sharing this callback always reaches the game's handler.
 extern "C" REX_FUNC(sub_8260EA48) {
-  if (IsInstalled() && g_restart_popup_open) {
-    g_restart_popup_open = false;
-    if (ctx.r4.u32 == 0) {
+  if (IsInstalled() && g_restart_popup_id != kNoPopup && ctx.r3.s32 == g_restart_popup_id) {
+    g_restart_popup_id = kNoPopup;
+    const int32_t button = ctx.r4.s32;
+    REXLOG_INFO("Options menu: restart prompt answered (button {})", button);
+    if (button == 0) {
       ApplyPendingAndRestart();
       return;
     }
-    // Discard Changes: drop the staged choices and finish the Back the
-    // prompt interrupted (the root Options screen).
-    DiscardPending();
-    const uint32_t state = OptionsState(ctx, base);
-    if (PageOf(base, state)) {
-      PlaySound(ctx, base, kBackSound);
-      ctx.r3.u64 = state;
-      sub_8260D078(ctx, base);
+    if (button == 1) {
+      // Discard Changes: drop the staged choices and finish the Back the
+      // prompt interrupted (the root Options screen).
+      DiscardPending();
+      const uint32_t state = OptionsState(ctx, base);
+      if (PageOf(base, state)) {
+        PlaySound(ctx, base, kBackSound);
+        ctx.r3.u64 = state;
+        sub_8260D078(ctx, base);
+      }
     }
+    // Dismissed without a choice (the manager flushing its popups, possibly
+    // while the screen goes away): leave the staged choices and the screen
+    // alone; the next Back on the page prompts again.
     return;
   }
   __imp__sub_8260EA48(ctx, base);
@@ -852,12 +936,10 @@ extern "C" REX_FUNC(sub_8260C258) {
         return;
       }
       Row* row = RowAt(*page, REX_LOAD_U32(state + kStateRowOffset));
-      if ((event == kInputLeft || event == kInputRight) && row && RowEnabled(*row)) {
-        StepRow(ctx, base, state, *row, event == kInputLeft ? -1 : 1);
-        ctx.r3.u64 = 1;
-      } else {
-        ctx.r3.u64 = 0;
-      }
+      const bool stepped = (event == kInputLeft || event == kInputRight) && row &&
+                           RowEnabled(*row) &&
+                           StepRow(ctx, base, state, *row, event == kInputLeft ? -1 : 1);
+      ctx.r3.u64 = stepped ? 1 : 0;
       return;
     }
   }
@@ -881,7 +963,7 @@ extern "C" REX_FUNC(sub_8260D7E8) {
   if (IsInstalled()) {
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
-      ctx.r3.s64 = row ? ShownIndex(*row) : 0;
+      ctx.r3.s64 = row ? ShownLabel(*row).value_or(0) : 0;
       return;
     }
   }
@@ -893,7 +975,10 @@ extern "C" REX_FUNC(sub_8260D968) {
   if (IsInstalled()) {
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
-      ctx.r3.u64 = row ? row->label_ids[ShownIndex(*row)] : kStringEmpty;
+      const std::optional<int> label = row ? ShownLabel(*row) : std::nullopt;
+      ctx.r3.u64 = label && static_cast<size_t>(*label) < row->label_ids.size()
+                       ? row->label_ids[*label]
+                       : kStringEmpty;
       return;
     }
   }
