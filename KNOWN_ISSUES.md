@@ -690,26 +690,6 @@ repro steps; the entry says where the problem is and how it would show.
   traffic despawn visibility check in the recompiled code and see which
   frustum it uses.
 
-### KI-64: Raw guest loads in the capture path and render hooks
-
-- **Status:** open · **Severity:** low–medium
-- **Area:** native renderer, guest memory safety
-- **Tracking:** none yet. Found while fixing KI-26 (#38).
-- **Where:**
-  - `src/skate3_native_scene.cpp`: `BuildItemFromMeshCached` reads
-    `mesh+0x34` and `mesh+0x30` raw on every frame's cache-hit check, and
-    `BuildItemGeometry` reads `ctx` and then `record` raw.
-  - `src/skate3_native_render.cpp`: `REX_LOAD_U32(sort_vec)`,
-    `REX_LOAD_U32(entry + 4)`, `self + 3240` and `REX_LOAD_U8(self + 3397/3396)`
-    in the hooks.
-- **Problem:** if streaming unmaps a mesh between being recorded and the frame
-  build, the guest render thread faults and the game crashes.
-  `GuestReadRecoveryScope` is a no-op on Windows, so nothing catches it. The
-  risk is low, because these pointers come from what the game is drawing
-  right now.
-- **Next step:** switch them to `GuestTryLoadU32`. That's a few guarded calls
-  per item per frame, so measure the cost with `perf_items`.
-
 ### KI-65: Prewarm retries lose the visible-miss priority
 
 - **Status:** open · **Severity:** low–medium
@@ -1313,6 +1293,49 @@ repro steps; the entry says where the problem is and how it would show.
 - **Emulated (F5), not fixed here:** in a gameplay presence context with
   `readback_resolve=none`, the emulated renderer would read the same stale
   memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
+
+### KI-64: Raw guest loads in the capture path and render hooks
+
+- **Status:** fix in review, tested unattended. Awaiting an in-game test.
+- **Tracking:** rubensteezy/skate3recomp#48. Found while fixing KI-26 (#38).
+- **Problem:** the frame build and the capture hooks read guest memory with
+  raw `REX_LOAD`s on the guest render thread:
+  - `src/skate3_native_scene.cpp`: `BuildItemFromMeshCached` read the mesh's
+    IB/VB pointers (+0x30/+0x34) on every cache-hit check, and
+    `BuildItemGeometry` read the MeshContext (record, draw count, draw
+    list), the record and the draw list entries.
+  - `src/skate3_native_render.cpp`: `OnSceneDrawList` and
+    `FilterSceneDrawList` read the sort vector and its entries, and the
+    auto-exposure hook (`sub_827F0D00`) read `self + 3240` and the ownership
+    bytes at `self + 3396/3397`.
+- **Cause:** if streaming unmaps one of these between being recorded and
+  being read, the load is an access violation that kills the process.
+  `GuestReadRecoveryScope` is a no-op on Windows, so nothing caught it. The
+  risk was low, because the pointers come from what the game is drawing
+  right now. No crash had been reported.
+- **Fix:** every one of those reads now goes through `GuestTryCopy` or
+  `GuestTryLoadU32`, batched where the fields sit together: one 8-byte copy
+  for the cache-hit IB/VB check, one copy of the MeshContext head
+  (+0x00..+0x4B), one copy of the whole draw list, and one copy of the
+  sort-list segment per hook call. A failed read skips that item (counted in
+  `rej[chain]` or `rej[draws]`), skips that sort list's capture, leaves the
+  list unfiltered, or skips that frame's exposure pin. Every skip is counted
+  by `NoteGuestReadSkip`, which logs `guarded guest read failed at <site>`
+  with the running total at most once per 10 s. `BuildItemFromMesh` is left
+  to #38 (KI-26), which already reads its mesh header through one guarded
+  copy.
+- **Cost:** measured with `--skate3_native_render_scene_perf_log=true
+  --skate3_native_render_scene_perf_items=true`, 6 unattended demo-path
+  runs per build (3 D3D12, 3 Vulkan), against a same-machine build of main.
+  The frame-build walk (`wloop`) went from 453 to 462 ns per record (+2%,
+  about 8 µs per frame at ~920 records), which is +0.4% of the build
+  (1.199 to 1.204 ms) and well under 1% of capture plus build. Guest fps
+  (219.7 in both), item cache validate cost (`core` 0.397 µs in both),
+  items (588 vs 593) and draws (990 vs 991) didn't change. A microbenchmark
+  puts one guarded copy at 3 to 4.5 ns against 1.2 ns for two raw loads.
+- **Tested:** the runs above all reached gameplay, logged no guarded-read
+  skips and no `rej` counts, and showed the same error and warning lines as
+  main. Not yet played in-game.
 
 ### Reviewed and ruled out (code review)
 
