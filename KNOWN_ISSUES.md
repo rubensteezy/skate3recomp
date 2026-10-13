@@ -165,14 +165,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Problem:** `ParseXuidString` tries hex first, so it misreads decimal
   XUIDs. `TomlString` doesn't escape control characters.
 
-### KI-25: Vehicle retention frustum test ignores the ultrawide scale
-
-- **Status:** open · **Severity:** low · was BT-18
-- **Where:** `src/skate3_native_scene.cpp`
-- **Problem:** the vehicle retention test omits `wide_hor_scale`, unlike the
-  static retention test, so on ultrawide outputs vehicles at the screen edges
-  can drop out of retention too early.
-
 ### KI-26: ProcessPrewarmEntry does an unguarded read on a worker
 
 - **Status:** open · **Severity:** low · was BT-19
@@ -804,6 +796,44 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-25: Vehicle retention frustum test ignores the ultrawide scale
+
+- **Status:** fix in review, tested unattended · **Severity:** low · was BT-18
+- **Tracking:** branch `fix/ki25-vehicle-retention-wide`
+- **Where:** `BuildFrameScene` and `CornersOutsideFrustum` in
+  `src/skate3_native_scene.cpp`
+- **Problem:** on ultrawide outputs (`skate3_ultrawide = true`) the game's
+  main-world cull is widened to the wide view
+  (`Skate3UltrawideGameFrustumPatchScope`), but the vehicle retention test
+  checked its "the guest camera can see it" condition against the narrow
+  16:9 guest frustum. The static retention test passes `wide_hor_scale`; the
+  vehicle test didn't. The review guessed vehicles would drop out of
+  retention too early. The effect is the other way round: a vehicle that
+  stopped being submitted in the side bands (outside 16:9, inside the wide
+  view) counted as view-culled, so a despawned or LOD-swapped car there was
+  re-published as a ghost copy for up to 10 frames.
+- **Second problem, same code:** the static test applied the scale by
+  dividing the whole margin, which widens the top and bottom planes too
+  (about 1.27x at 21:9). Statics the game view-culled just above or below
+  the screen counted as "really removed" and were dropped, so retention
+  stopped covering vertical pans on ultrawide.
+- **Fix:** `CornersOutsideFrustum`, `ItemOutsideFrustum` and
+  `BoxOutsideFrustum` take the Hor+ scale as its own argument and widen only
+  the left and right planes. `wide_hor_scale` is computed before the vehicle
+  pass, and both passes share the margins (`kRetainGuestCullMargin`,
+  `kRetainDrawMargin`). With a 16:9 output (scale 1.0) nothing changes.
+- **Tested:** unattended demo-path boots in a 2560x1080 window with
+  `--skate3_ultrawide=true --skate3_ultrawide_target_aspect=2.37` (21:9,
+  scale 0.75), signed in on a copy of the user's save, D3D12 and Vulkan, with a
+  temporary counter that evaluated the old and new tests on the same frames.
+  Traffic was submitted inside the side bands (5,149 live captures), which
+  confirms vehicles are culled to the wide view, not 16:9. Old and new vehicle
+  decisions agreed on all 602 re-publish candidates (static camera, so no
+  pans and no side-band despawns in the sample). The static test kept about
+  0.1% more entries and drew 13% (D3D12) and 3% (Vulkan) more retained items,
+  all in the top and bottom bands, which is the 16:9 behaviour. Not yet
+  watched in play: needs a pan near traffic on an ultrawide output.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
