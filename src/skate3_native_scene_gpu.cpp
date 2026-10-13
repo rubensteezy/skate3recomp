@@ -6829,6 +6829,31 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   g_r.static_sun_valid = true;
 }
 
+// Readback layout of one shadow-dump frame for a given cascade tile size:
+// the raw atlas plane, then the blurred plane, each (3 * tile) x tile
+// R16G16 texels. Copy row pitches must be kRowPitchAlignment-aligned and
+// D3D12 places a copy footprint on a 512-byte boundary, so a tile that is
+// not a multiple of 64 (any 1..4096 is a legal cvar value) gets padded rows
+// and a padded plane offset; the file on disk stays tightly packed.
+struct ShadowDumpLayout {
+  uint32_t row_bytes;     // packed bytes per atlas row (tile * 3 * 4)
+  uint32_t pitch;         // readback row pitch
+  uint64_t plane_offset;  // byte offset of the blurred plane
+  uint64_t size;          // whole readback buffer
+};
+
+ShadowDumpLayout ShadowDumpLayoutFor(uint32_t tile) {
+  constexpr uint64_t kPlacementAlignment = 512;  // D3D12 footprint offset
+  ShadowDumpLayout l;
+  l.row_bytes = tile * 3u * 4u;
+  l.pitch = (l.row_bytes + (nrhi::kRowPitchAlignment - 1u)) &
+            ~(nrhi::kRowPitchAlignment - 1u);
+  l.plane_offset = (uint64_t(l.pitch) * tile + (kPlacementAlignment - 1u)) &
+                   ~(kPlacementAlignment - 1u);
+  l.size = l.plane_offset + uint64_t(l.pitch) * tile;
+  return l;
+}
+
 bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
                        const FrameScene& scene, uint32_t bone_region,
                        int32_t debug_mode, uint32_t* out_draws) {
@@ -6848,10 +6873,11 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
          context.device->CompletedSubmission() >
              g_r.shadow_dump_submission[g_r.shadow_dump_written]) {
     const uint32_t k = g_r.shadow_dump_written;
-    const uint32_t tile_px = g_r.shadow_tile;
-    const uint32_t pitch = tile_px * 3u * 4u;
-    const uint64_t plane = uint64_t(pitch) * tile_px;
-    context.device->InvalidateForRead(g_r.shadow_dump_buf[k], 0, plane * 2);
+    // The tile this slot's copy was recorded at, not the current atlas
+    // tile: the tile may have changed live since the copy was enqueued.
+    const uint32_t tile_px = g_r.shadow_dump_tile[k];
+    const ShadowDumpLayout layout = ShadowDumpLayoutFor(tile_px);
+    context.device->InvalidateForRead(g_r.shadow_dump_buf[k], 0, layout.size);
     std::string dir = REXCVAR_GET(skate3_native_render_snapshot_dir);
     if (dir.empty()) {
       dir = "native_render_snapshots";
@@ -6864,8 +6890,18 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
          std::to_string(k) + "_" + std::to_string(tile_px * 3) + "x" +
          std::to_string(tile_px) + "_rg16.bin");
     std::ofstream out(path, std::ios::binary);
-    out.write(reinterpret_cast<const char*>(g_r.shadow_dump_ptr[k]),
-              std::streamsize(plane * 2));
+    for (const uint64_t plane_base : {uint64_t(0), layout.plane_offset}) {
+      const uint8_t* src = g_r.shadow_dump_ptr[k] + plane_base;
+      if (layout.pitch == layout.row_bytes) {
+        out.write(reinterpret_cast<const char*>(src),
+                  std::streamsize(uint64_t(layout.row_bytes) * tile_px));
+        continue;
+      }
+      for (uint32_t row = 0; row < tile_px; ++row) {
+        out.write(reinterpret_cast<const char*>(src + uint64_t(row) * layout.pitch),
+                  std::streamsize(layout.row_bytes));
+      }
+    }
     REXLOG_INFO(
         "native-scene: shadow atlas frame {} dumped (raw+blurred planes) -> {}",
         k, path.string());
@@ -7115,11 +7151,23 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
           !g_r.shadow_dump_done &&
           g_r.shadow_dump_enqueued < RendererState::kShadowDumpFrames) {
         const uint32_t k = g_r.shadow_dump_enqueued;
-        const uint32_t pitch = tile * 3u * 4u;
-        const uint64_t plane = uint64_t(pitch) * tile;
+        const ShadowDumpLayout layout = ShadowDumpLayoutFor(tile);
+        if (g_r.shadow_dump_buf[k] != nullptr &&
+            g_r.shadow_dump_tile[k] != tile) {
+          // Sized for an earlier tile (the atlas was recreated since): the
+          // copies below would run past its end. Slot k is only reused
+          // once its previous dump was written, i.e. after that copy's
+          // submission completed, and DestroyDeferred additionally holds
+          // the buffer until the current submission completes.
+          context.device->Unmap(g_r.shadow_dump_buf[k]);
+          context.device->DestroyDeferred(g_r.shadow_dump_buf[k]);
+          g_r.shadow_dump_buf[k] = nullptr;
+          g_r.shadow_dump_ptr[k] = nullptr;
+          g_r.shadow_dump_tile[k] = 0;
+        }
         if (g_r.shadow_dump_buf[k] == nullptr) {
           nrhi::BufferDesc desc;
-          desc.size = plane * 2;
+          desc.size = layout.size;
           desc.heap = nrhi::HeapKind::kReadback;
           g_r.shadow_dump_buf[k] = context.device->CreateBuffer(desc);
           g_r.shadow_dump_ptr[k] =
@@ -7127,6 +7175,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
                   ? static_cast<uint8_t*>(
                         context.device->Map(g_r.shadow_dump_buf[k]))
                   : nullptr;
+          g_r.shadow_dump_tile[k] = g_r.shadow_dump_ptr[k] != nullptr ? tile : 0;
         }
         if (g_r.shadow_dump_ptr[k] != nullptr) {
           cmd->Barrier(g_r.shadow_raw, nrhi::ResourceState::kPixelShaderResource,
@@ -7135,10 +7184,11 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
                        nrhi::ResourceState::kPixelShaderResource,
                        nrhi::ResourceState::kCopySource);
           cmd->FlushBarriers();
-          cmd->CopyTextureToBuffer(g_r.shadow_dump_buf[k], 0, pitch,
+          cmd->CopyTextureToBuffer(g_r.shadow_dump_buf[k], 0, layout.pitch,
                                    g_r.shadow_raw, 0, tile * 3, tile);
-          cmd->CopyTextureToBuffer(g_r.shadow_dump_buf[k], plane, pitch,
-                                   g_r.shadow_final, 0, tile * 3, tile);
+          cmd->CopyTextureToBuffer(g_r.shadow_dump_buf[k], layout.plane_offset,
+                                   layout.pitch, g_r.shadow_final, 0, tile * 3,
+                                   tile);
           cmd->Barrier(g_r.shadow_raw, nrhi::ResourceState::kCopySource,
                        nrhi::ResourceState::kPixelShaderResource);
           cmd->Barrier(g_r.shadow_final, nrhi::ResourceState::kCopySource,

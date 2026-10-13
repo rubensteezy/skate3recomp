@@ -889,6 +889,11 @@ struct RendererState {
   static constexpr uint32_t kShadowDumpFrames = 4;
   nrhi::Buffer* shadow_dump_buf[kShadowDumpFrames] = {};
   uint8_t* shadow_dump_ptr[kShadowDumpFrames] = {};
+  // The tile size each buffer was created (sized) for, 0 = none. The atlas
+  // tile changes live (skate3_native_render_scene_shadow_tile, auto mode,
+  // F12 MAX QUALITY), so a buffer is recreated whenever its key no longer
+  // matches, and its write-out uses the tile its copy was recorded at.
+  uint32_t shadow_dump_tile[kShadowDumpFrames] = {};
   uint64_t shadow_dump_submission[kShadowDumpFrames] = {};
   uint32_t shadow_dump_enqueued = 0;
   uint32_t shadow_dump_written = 0;
