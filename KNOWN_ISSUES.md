@@ -524,7 +524,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-18: Draw-distance slots never freed; LOD distances scaled in place
 
-- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM, awaiting in-game
+- **Status:** fix in review in rubensteezy/skate3recomp#30, awaiting in-game
   test · **Severity:** low–medium · was BT-11
 - **Area:** draw distance
 - **Where:** `src/skate3_draw_distance.cpp` (`EnsureCullThresholdScaled`,
