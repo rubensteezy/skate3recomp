@@ -490,6 +490,38 @@ repro steps; the entry says where the problem is and how it would show.
 - **Fix:** fall back to `g_r.white.srv`, or skip the depth pack when the view
   is null.
 
+### KI-51: Occlusion grid can miss thin gaps at high render scales
+
+- **Status:** open (unconfirmed) · **Severity:** low–medium
+- **Area:** native renderer, occlusion culling
+- **Tracking:** none yet. Found while fixing KI-21 (#33).
+- **Where:** `ps_depth_max` in `src/native/shaders/ssao.hlsl`.
+- **Problem:** the grid reduce takes only 8x8 point samples per tile. Its
+  comment accepts that a gap under 3 px can be missed at 4K because "the
+  consumer is telemetry, not culling". That's no longer true: the occlusion
+  cull reads this grid, so a missed gap can hide a distant object that is
+  visible through railings or fence slats. The 1 m depth margin doesn't help
+  with gaps. At `resolution_scale = 3` (the user's setting), tiles reach
+  about 24 px and the samples are about 3 px apart.
+- **Next step:** sample every texel of the tile's footprint, or reduce through
+  a two-level chain, and update the comment. Regenerate the SPIR-V. Test by
+  looking through fences and railings at render scale 3x, with the occlusion
+  cull on and then off.
+
+### KI-52: Demo-path map-switch inputs may not work
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** test tooling
+- **Tracking:** none yet. Found while testing KI-21 (#33).
+- **Where:** the input sequence in the help text of
+  `skate3_demo_path_gameplay_inputs` (`src/skate3_demo_path.cpp`).
+- **Problem:** in a signed-out demo boot all 14 inputs were injected, but
+  nothing loaded and the item counts stayed the same, so the documented
+  map-switch sequence seems to do nothing. Unattended tests that rely on it
+  would silently stay in one area.
+- **Next step:** check whether it needs `--skate3_demo_path_signed_in=true`, or
+  whether the menu layout changed. Then fix the sequence or its help text.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
