@@ -180,13 +180,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Problem:** it does a guarded copy into `record` that is never used, then a
   raw `REX_LOAD` on the worker thread.
 
-### KI-27: DecodeMesh input validation
-
-- **Status:** open · **Severity:** low · was BT-20
-- **Problem:** element offsets aren't checked against the vertex stride (a
-  host over-read on a malformed declaration), and several `Map()` results
-  aren't checked for null.
-
 ### KI-28: Options menu edge cases
 
 - **Status:** open · **Severity:** low · was BT-21
@@ -898,6 +891,45 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-27: DecodeMesh input validation
+
+- **Status:** fix in review, tested unattended · **Severity:** low · was BT-20
+- **Problem:** element offsets aren't checked against the vertex stride (a
+  host over-read on a malformed declaration), and several `Map()` results
+  aren't checked for null.
+- **Cause:** `DecodeMesh` (`src/skate3_native_scene_gpu.cpp`) reads each
+  element at `v * stride + offset`. The offsets are 16-bit fields from the
+  guest vertex declaration and the stride is a separate byte, so nothing tied
+  them together: an element placed past the stride read past the end of the
+  host payload copy on the last vertex. The vertex count was also divided by
+  the stride before anything checked it, and the cloth snapshot path passed
+  payload pointers with no size. Both upload-buffer `Map()` results were
+  written through unchecked, as were the staging `Map()`s in the texture
+  decode paths (`UploadGeneratedMips`, `EnsureGuestTextureFromWords`, both
+  branches of `EnsureGuestCubeTexture`) and in `EnsureFallbackTextures`.
+- **Fix:** `ValidateMeshDecodeInput` (`src/native/mesh_decode_validate.h`)
+  runs before any payload read. It checks stride > 0, at least one vertex,
+  vertex and index counts under a cap (1M / 8M), payload sizes covering
+  count × stride and count × 2, a decodable position format, and
+  offset + bytes read <= stride for every element `DecodeMesh` reads. It uses
+  the bytes actually read, not the format's nominal size, because the
+  synthetic cloth-quad item declares a float2 UV as `k_32_32_32_32_FLOAT`.
+  A rejected mesh fails the decode like any other failure (nothing is cached,
+  the draw-path miss re-requests it) and is counted in
+  `g_mesh_decode_rejected`, with a rate-limited warning (8 lines per 10 s).
+  `DecodeMesh` now maps both upload buffers up front; on a `Map()` failure it
+  unmaps what was mapped, releases both buffers and fails the decode, counted
+  in `g_mesh_map_failed`. The texture paths release the texture and staging
+  buffer and fail the decode; `EnsureFallbackTextures` sets `g_r.failed` like
+  its other failures. The "gameplay (prewarm: ...)" log line reports both
+  counters.
+- **Tested:** unit check of the validator against the real `DrawItem` with
+  crafted bad declarations (element past the stride, garbage offsets and
+  counts, short snapshots) plus the real cloth-quad layout. Unattended
+  `--skate3_demo_path=true` boots on D3D12 (3067 meshes) and Vulkan (3056),
+  inside the usual 3056 to 3070 range, with 0 dropped, 0 layout rejections
+  and 0 map failures. Not yet checked in a hands-on session.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
