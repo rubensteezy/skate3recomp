@@ -406,7 +406,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-16: Upload rings reused without a GPU completion check
 
-- **Status:** fix in review (PR link to follow) · was BT-09
+- **Status:** fixed in rubensteezy/skate3recomp#28, in-game test pending · was BT-09
 - **Problem:** the native renderer's per-frame upload rings (bone + ROPA
   vertices, UI vertices, shadow constants, photo FX constants, screen FX
   constants) picked their region with `frame_number % N` and never checked
