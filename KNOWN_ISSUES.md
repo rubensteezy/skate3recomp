@@ -865,6 +865,48 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** if that warning ever appears, add a "user set while held" path
   that updates `saved_`.
 
+### KI-75: Scene ring dumps taken in the same second overwrite each other
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, diagnostics
+- **Tracking:** none yet. Found while fixing KI-32 (#44).
+- **Where:** `MaybeDumpSceneRing` in `src/skate3_native_scene_state.h`.
+  `SnapshotStem` in `src/native/skate3_native_diagnostics.cpp` uses the same
+  seconds-only naming.
+- **Problem:** the dump file is `logs/scene_ring_<time in seconds>.csv`, so an
+  F7 dump and an RB+A dump in the same second overwrite each other. That's the
+  same bug #44 fixes for screenshots. A snapshot takes several frames, so a
+  clash there is unlikely.
+- **Also:** the comment in `skate3_screenshot.h` says A/B captures "share one
+  timestamp". They actually share a tag with its own HH:MM:SS, and the file
+  stamps differ.
+- **Fix:** reuse #44's millisecond stamp, and reword the comment.
+
+### KI-76: Scene ring may use about 150 MB while on (debug only)
+
+- **Status:** open (estimate, not measured) · **Severity:** low
+- **Area:** native renderer, diagnostics
+- **Tracking:** none yet. Found while fixing KI-32 (#44).
+- **Where:** `kSceneRingFrames` (2400) and `SceneRingItem` (about 80 bytes).
+- **Problem:** at about 800 items a frame, 2400 frames is roughly 150 MB of RAM
+  while `skate3_native_render_scene_ring` is on, and a dump would be a few
+  hundred MB of CSV. It's off by default and debug-only.
+- **Next step:** measure it, and put the real size in the cvar help text.
+
+### KI-77: Photo grab assumes 4-byte output pixels
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, photo grab
+- **Tracking:** none yet. Found while fixing KI-32 (#44).
+- **Where:** `RendererState::kGrabRowPitch = kBlurWidth * 4`; the grab reads
+  `blur_tex[0]`, which uses the output format.
+- **Problem:** that's correct for today's fixed R10G10B10A2 output. If the output
+  format ever changed (the case #44 now guards for the blur targets), the
+  pitch and the CPU tiling would be wrong. The output format is a compile-time
+  constant in the SDK (`kGuestOutputFormat`), so nothing at runtime changes it
+  today.
+- **Fix:** add a static check or a comment next to #44's format key.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
