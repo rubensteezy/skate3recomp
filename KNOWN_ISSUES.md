@@ -1020,8 +1020,11 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-31: C++ tests not built, no CI
 
-- **Status:** fix in review (PR pending) · **Severity:** low · was BT-24
-- **Tracking:** branch `fix/ki31-tests-ci`. CI: not run yet.
+- **Status:** fix in review in rubensteezy/skate3recomp#43 · **Severity:**
+  low · was BT-24
+- **Tracking:** #43. CI: all five `tests` jobs pass on the PR (Python 24/24;
+  C++ 3/3 on Windows MSVC 19.51 and clang 22.1, Ubuntu clang 18.1 and
+  GCC 13.3).
 - **Problem:** `tests/*.cpp` (character fade, Hall of Meat, screen FX) weren't
   wired into CMake, and they used `assert`, which does nothing in release
   builds. This repository had no CI, so neither these nor the Python tests
