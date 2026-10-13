@@ -449,6 +449,47 @@ repro steps; the entry says where the problem is and how it would show.
   paths becomes an uncaught exception.
 - **Fix:** one sweep to the `error_code` overloads.
 
+### KI-48: Guest-output view can go stale after an RHI mailbox eviction
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** native renderer, SDK native RHI
+- **Tracking:** none yet. Found while fixing KI-20 (#32).
+- **Where:** `EnsureOutputSrv` in `src/skate3_native_scene_gpu.cpp` (added in
+  #32), and the SDK's `guest_outputs_` map in `native_rhi_d3d12.cpp` and
+  `native_rhi_vulkan.cpp`.
+- **Problem:** once the map holds more than 6 entries (after several resizes),
+  the RHI deletes old texture wrappers and allocates new ones with no serial.
+  A new wrapper at the same address and size, for example after resizing back
+  to an earlier size, still matches the pointer-plus-size key, so the view
+  keeps pointing at the old texture.
+- **Evidence:** code reading only, not reproduced.
+- **Next step:** give `nrhi::Texture` a creation serial in the SDK (SDK-fork PR
+  plus an "sdk: bump" commit) and key the view on it.
+
+### KI-49: Guest-output view may be rebuilt every frame
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** native renderer, performance
+- **Tracking:** none yet. Found while fixing KI-20 (#32).
+- **Where:** `EnsureOutputSrv` in `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** the SDK comments describe a "small guest-output mailbox" in the
+  presenter. If it rotates images, `context.guest_output` changes every frame,
+  so the view is destroyed and recreated every frame.
+- **Next step:** log how many times per second the view is rebuilt. If it's
+  every frame, keep one view per mailbox image.
+
+### KI-50: Photo FX depth view isn't checked for null
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, photo FX
+- **Tracking:** none yet. Found while fixing KI-20 (#32).
+- **Where:** `RenderScene` in `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** the result of `CreateTextureView` for `pfx_srv[7]` is passed to
+  `pfx_bind_all(..., g_r.pfx_srv[7])` without a null check. A failed create
+  binds null for that frame, and it retries the next frame.
+- **Fix:** fall back to `g_r.white.srv`, or skip the depth pack when the view
+  is null.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
