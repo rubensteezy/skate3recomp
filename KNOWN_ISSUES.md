@@ -332,6 +332,45 @@ repro steps; the entry says where the problem is and how it would show.
 - **Fix:** clamp it, or assert and log when `cb_slot_next` reaches
   `kPfxCbSlots`.
 
+### KI-41: Shadow-pass textures can be evicted while still in use
+
+- **Status:** open (unconfirmed) · **Severity:** low–medium
+- **Area:** native renderer, shadows, texture cache
+- **Tracking:** none yet. Found while fixing KI-17 (#29).
+- **Where:** `LookupResolvedTexture` in `src/skate3_native_scene_gpu.cpp`,
+  called by `RenderShadowAtlas` for alpha-clip casters (`item.dynobj == 2`).
+  It is also called by `RenderStaticSunMap` for phase-1 `rec.diffuse_tex`,
+  but that pass is experimental since KI-5.
+- **Problem:** it reads the `tex_store` entry but never stamps its
+  `last_used_frame`. `EvictTexStore` picks eviction candidates by
+  `last_used_frame` alone, with a 5 s idle guard under byte pressure. A
+  texture used only by the shadow passes, such as an off-screen or culled
+  caster, looks idle and can be evicted. The caster passes never enqueue a
+  decode, so it stays gone until the main pass draws that item again.
+- **How it would show:** under texture-memory pressure, alpha-tested shadows
+  (foliage, fences) become solid shapes for casters outside the view.
+- **Evidence:** code reading only, not reproduced. #29 stamps the route in
+  that function but deliberately leaves the store entry alone.
+- **Next step:** after #29 lands, also set
+  `sit->second.last_used_frame = frame_number` there (#29 passes
+  `frame_number` in). Test with a small
+  `skate3_native_render_scene_tex_store_mb` near foliage and compare shadow
+  shapes with F5.
+
+### KI-42: Perf log line repeats the texture count
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, diagnostics
+- **Tracking:** none yet. Found while fixing KI-17 (#29).
+- **Where:** `LogFrameStats` in `src/skate3_native_scene_gpu.cpp`, the
+  `native-scene: frame N ...` line.
+- **Problem:** `g_r.tex_store.size()` is logged three times: as
+  `2d[... textures=]`, as `textures=` and as `store[n=]`. The 2D
+  `textures=` field looks like a leftover from a separate 2D cache that no
+  longer exists, so it misleads.
+- **Fix:** drop the 2D `textures=` field, or make it count something
+  2D-specific.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
