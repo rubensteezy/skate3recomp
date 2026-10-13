@@ -151,13 +151,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Problem:** the shadow-dump readback buffers keep their first size after a
   shadow tile change, so a later recording copies out of bounds on the GPU.
 
-### KI-23: OnShutdown misses several UnregisterBind calls
-
-- **Status:** open · **Severity:** low · was BT-16
-- **Where:** `src/skate3_app_common.cpp`
-- **Problem:** the screenshot bind (which captures `this`), the F5 toggle,
-  showcase and freecam binds are never unregistered on shutdown.
-
 ### KI-24: XUID parsing and TOML escaping in user settings
 
 - **Status:** open · **Severity:** low · was BT-17
@@ -717,6 +710,37 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-23: OnShutdown missed several UnregisterBind calls
+
+- **Status:** fix in review (PR_PLACEHOLDER), tested unattended · was BT-16
+- **Problem:** `Skate3BaseApp::OnCreateDialogs` registers ten key binds, but
+  `OnShutdown` only unregistered six. The screenshot bind (F6, captures
+  `this`), the F5 renderer toggle, the Ctrl+Shift+B showcase bind and the End
+  freecam bind stayed live. The SDK's bind registry is a process-lifetime
+  static, so a key event reaching it after the app object was gone would call
+  into a destroyed object.
+- **Reach:** low in practice. The normal window close (and the overlay's Close
+  Game on Windows/Linux) ends in `ReXApp::OnClosing`, which hard-exits before
+  `OnDestroy`, so `OnShutdown` never runs there. It runs when the app quits
+  through `QuitFromUIThread` or a failed `OnInitialize`: a cancelled or failed
+  ISO / title update install, a `ConstructRuntime` failure, and Close Game on
+  macOS.
+- **Fix:** binds are registered through `RegisterAppBind`, which records each
+  name; `OnShutdown` calls `UnregisterAppBinds`, which unregisters them all in
+  reverse order before the dialogs they reach are reset, and logs
+  "Skate 3 shutdown: unregistered N key binds". The SDK has no RAII bind
+  handle. `UnregisterBind` only nulls the callback, so it is safe at any point
+  in `OnShutdown` (the registry outlives the app, and `ReXApp::OnDestroy`
+  calls `OnShutdown` before its own overlay teardown).
+- **Tested:** relwithdebinfo build. A bogus `SKATE3_INSTALL_ISO` into an empty
+  game root makes the installer fail and quit through `OnShutdown`: the log
+  shows "unregistered 10 key binds", exit code 0, no WER report (the baseline
+  build exits the same way without the line). `--skate3_demo_path=true` to
+  gameplay, then WM_CLOSE: "Title terminated; hard-exiting process.", exit
+  code 0, no WER report, same as baseline.
+- **Not tested:** pressing the bind keys in this build (synthetic keys could
+  not reach the unfocused window).
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
