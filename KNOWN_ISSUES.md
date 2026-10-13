@@ -236,22 +236,6 @@ repro steps; the entry says where the problem is and how it would show.
   hook lands on the wrong function in one of the two builds.
 - **Next step:** diff the hooked addresses between the base and TU3 codegen.
 
-### KI-35: Team-member portraits in character creation show old photos
-
-- **Status:** investigating
-- **Area:** menus, skater portraits
-- **Tracking:** fix session `team-portraits`
-- **Symptom:** in the character creation menu, the photos of the additional
-  team-member skaters show images taken earlier in the game, from earlier
-  events.
-- **Cause so far:** unknown. Not yet checked whether the emulated renderer (F5)
-  shows it. Likely suspect: the one-shot skater-portrait render-to-texture
-  passes are skipped or never resolved, so the shared target keeps the last
-  photo drawn into it. PR #17 recently changed the portrait/menu suppress-mode
-  overrides.
-- **Next step:** reproduce, compare with F5, and take an F10 capture on the bad
-  screen.
-
 ### KI-36: Event-start 2D draws with a 32-byte vertex layout are dropped
 
 - **Status:** open
@@ -455,6 +439,39 @@ repro steps; the entry says where the problem is and how it would show.
   `RenderScene` stops at `kUiSplineBudget`, 1 MB short of the end, so the HUD
   always has room. A skipped spline or 2D draw now logs a rolling-capped
   "UI vertex region full" warning.
+
+### KI-35: Team-member portraits in character creation show old photos
+
+- **Status:** fixed in this PR. Confirmed in-game on D3D12 and Vulkan on
+  2026-10-12.
+- **Symptom:** in Pause > Create Skater, the boxes of the extra team members
+  showed photos from earlier events instead of each skater's portrait, a
+  different old photo per member. The emulated renderer (F5) showed the same
+  images because the portrait is saved with the team member. The bad members
+  came from the career "new team member" prompt on the native renderer
+  (v2.1.0).
+- **Cause:** `SkaterPresentationPhoto` (request `sub_8278EE78`, render and
+  extract step `sub_8278E960`) renders the skater into the postfx manager's
+  1152x640 screenshot target, and `PhotoEffects::GeneratePhoto` CPU-reads that
+  resolve from guest memory at 0x04911000 into the 128x256 portrait. That's the
+  same surface the photo grab fills. On the native renderer the resolve only
+  reached CPU memory when the pause-menu portrait window (suppress mode 3,
+  picked by FE-stack heuristics in `YieldForMenus`) and the SDK's targeted
+  0x04911000 copy (non-gameplay contexts only) both applied. The career prompt
+  fell outside them, so the portrait was cut from whatever the last photo grab
+  left there. Reproduced on main with
+  `--skate3_native_render_scene_menu_rtt_passes=false`: take a photo, edit a
+  member, and its portrait becomes that photo.
+- **Fix:** hooks on the request and the step (`skate3_native_render.cpp`)
+  drive `UpdateSkaterPhotoWindow` (`skate3_native_scene_gpu.cpp`). From the
+  request until the step reports done, it holds suppress mode 3, synchronous
+  shaders and the forced readback of resolves up to 0x2D0000, in any presence
+  context. The native photo grab also stops writing 0x04911000 for that time.
+  The log shows "skater photo window OPEN" and "skater photo generated (...
+  window armed)". Existing bad portraits heal by editing the member once.
+- **Emulated (F5), not fixed here:** in a gameplay presence context with
+  `readback_resolve=none`, the emulated renderer would read the same stale
+  memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
 
 ### Reviewed and ruled out (code review)
 
