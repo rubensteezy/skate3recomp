@@ -252,6 +252,28 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** reproduce, compare with F5, and take an F10 capture on the bad
   screen.
 
+### KI-36: Event-start 2D draws with a 32-byte vertex layout are dropped
+
+- **Status:** open
+- **Area:** HUD / UI, events (native renderer)
+- **Tracking:** none yet. Found while fixing KI-34 (#25).
+- **Symptom:** none seen in play yet. The logs show that at the start of an Own
+  the Lot event some 2D draws are never drawn on the native renderer, so an
+  intro or banner element may be missing.
+- **Evidence:** temporary per-second 2D stream stats (not committed) logged
+  draws with a 32-byte vertex stride as quad lists (prim 13) in the
+  event-start window: 64 in one second and 83 the next. `g_draws_2d_other`
+  rose from 0 to 147 at the same time. A free-roam run showed other bursts in
+  `g_draws_2d_other` (+240, +176), but their stride wasn't logged.
+- **Cause so far:** `Publish2dDraws` (`skate3_native_scene.cpp`) handles only
+  16, 20, 24 and 28-byte vertex layouts. Any other stride is counted in
+  `g_draws_2d_other` and dropped. The 32-byte layout isn't decoded yet; it
+  could be pos4 + color + uv + one more field, or pos4 + uv + uv2.
+- **Emulated (F5):** not checked.
+- **Next step:** take an F10 capture right at event start. The `.draws.bin`
+  records the 2D draws with their inline vertex data. Decode the 32-byte
+  vertices, compare with F5, then add the layout to `Publish2dDraws`.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
