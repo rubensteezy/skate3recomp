@@ -414,23 +414,6 @@ repro steps; the entry says where the problem is and how it would show.
   game sound uses context 31. Compare with upstream rexglue-sdk, then listen
   for a missing or clipped sound at the moment the line is logged.
 
-### KI-46: Long user-data paths silently drop a VFS overlay alias
-
-- **Status:** open · **Severity:** low–medium
-- **Area:** app startup, file system overlay
-- **Tracking:** none yet. Found while fixing KI-19 (#31).
-- **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
-  / `CreateOverlayDirectory`.
-- **Problem:** with a long user-data path, the overlay folder
-  `<cache_root>\vfs_big_directory_aliases\data\state\livingworldentities\pedestrian\plugin`
-  passes CreateDirectoryW's 248-character limit and is never created. The
-  failure is only counted, never logged. A user with a long AppData or
-  portable path would silently lose the pedestrian plugin alias.
-- **Evidence:** a test run from a long scratch path logged "overlay with 10
-  aliases"; the same build from a short path logged 11.
-- **Next step:** log which alias failed. Then use `\\?\` long paths or a
-  shorter overlay root.
-
 ### KI-47: Other startup filesystem calls can throw
 
 - **Status:** open · **Severity:** low
@@ -1219,6 +1202,45 @@ repro steps; the entry says where the problem is and how it would show.
 - **Emulated (F5), not fixed here:** in a gameplay presence context with
   `readback_resolve=none`, the emulated renderer would read the same stale
   memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
+
+### KI-46: Long user-data paths silently drop a VFS overlay alias
+
+- **Status:** fix in review in rubensteezy/skate3recomp#46, tested
+  unattended. Found while fixing KI-19 (#31).
+- **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
+  / `CreateOverlayDirectory`.
+- **Problem:** with a long user-data path, the overlay folder
+  `<cache_root>\vfs_big_directory_aliases\data\state\livingworldentities\pedestrian\plugin`
+  passed CreateDirectoryW's 248-character limit and was never created. The
+  failure was only counted, never logged, so a user with a long AppData or
+  portable path silently lost the pedestrian plugin alias. A test run from a
+  long scratch path logged "overlay with 10 aliases"; the same build from a
+  short path logged 11.
+- **Cause:** the overlay used plain Win32 paths. CreateDirectoryW stops at 248
+  characters, and the SDK host device's `FindFirstFileW` /
+  `GetFileAttributesExW` calls (`ListFiles`, `GetInfo` in
+  `filesystem_win.cpp`) at MAX_PATH. The exe manifest has no `longPathAware`,
+  and that would also need the OS LongPathsEnabled policy.
+- **Fix:** `ToExtendedLengthPath` turns the overlay root into an absolute,
+  normalized `\\?\` path (`\\?\UNC\` for shares) before the folders are
+  created and before it becomes the `skate3bigdirs:` host device root. The
+  SDK device builds every entry path from that root and passes it straight to
+  the wide Win32 calls, so the whole overlay tree is long-path safe with no
+  SDK change and no OS policy. Each alias that can't be created now logs a
+  warning with the guest path, host path, its length and the `error_code`
+  message and Win32 code, plus a summary line ("N of M alias directories
+  could not be created"). Linux and macOS are unchanged.
+- **Tested unattended** (relwithdebinfo, `--skate3_demo_path=true`, cwd = the
+  install folder), each run reached "gameplay reached":
+  - short user-data root (pedestrian alias path 153 characters): "overlay
+    with 11 aliases".
+  - long user-data root (218 characters, pedestrian alias path 299): "overlay
+    with 11 aliases", and the folder exists on disk. The pedestrian and
+    PluginDescriptor `NtCreateFile` probes log the same results as on the
+    short root.
+  - a file planted where the pedestrian `plugin` folder goes: the new
+    warning names the alias and path with "error 183", then "1 of 11 alias
+    directories could not be created" and "overlay with 10 aliases".
 
 ### Reviewed and ruled out (code review)
 
