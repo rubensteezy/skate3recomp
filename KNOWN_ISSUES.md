@@ -195,12 +195,6 @@ repro steps; the entry says where the problem is and how it would show.
   list. `g_restart_popup_open` can be left set if the popup closes by a path
   other than its callback.
 
-### KI-29: Icon updater leaves `.icon-new` behind
-
-- **Status:** open · **Severity:** low · was BT-22
-- **Where:** `src/skate3_win_icon.cpp`
-- **Problem:** a failed swap leaves the `.icon-new` file in place.
-
 ### KI-30: F12 dialog rewrites a cvar the render thread overrides
 
 - **Status:** open · **Severity:** low · was BT-23
@@ -974,6 +968,39 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-29: Icon updater leaves `.icon-new` behind
+
+- **Status:** fix in review, tested unattended · **Severity:** low · was BT-22
+- **Tracking:** branch `fix/ki29-icon-new-cleanup`. PR #18 (still open)
+  removes the whole on-disk icon self-patch for the Defender false positive;
+  if it merges, KI-29 is closed by removal and this fix becomes moot.
+- **Where:** `src/skate3_win_icon.cpp`, `EnsureExeIconResource` and the
+  icon thread in `ApplyGameIconFromGameData`. Still live on main: the shipped
+  exe has no icon resource, so every fresh exe patches itself on first run.
+- **Problem:** the updater copies the exe to `skate3.exe.icon-new`, patches
+  the copy, then swaps it in. When the second move of the swap (copy into
+  place) failed, the original was restored but the copy stayed, with nothing
+  logged. Other leftovers: a read-only exe gives a read-only copy (CopyFileW
+  copies attributes), which `DeleteFileW` refuses, and which then makes every
+  later patch fail at the copy step. A run killed mid-patch left the copy and
+  a partial `RCX*.tmp` (the scratch image `EndUpdateResourceW` writes next to
+  the target), each about 100 MB, and nothing ever removed them.
+- **Fix:** every failure path removes the copy (`RemoveTempFile` clears the
+  read-only bit and retries briefly) and logs the Win32 error. The one
+  exception: when the restore also fails, the copy is kept and an error names
+  it and the parked original, since the exe path is then empty. At startup,
+  `CleanupStaleIconTemp` removes a leftover `.icon-new` and PE-headed
+  `RCX*.tmp` next to the exe, but only if it was last touched before this
+  process started and no other process runs the same exe. The patch itself
+  is skipped while another instance of the same exe runs.
+- **Tests:** a harness that compiles the file unchanged with `MoveFileW`
+  fault injection showed the old code leaving `.icon-new` after a failed swap
+  and after a read-only exe, and the new code leaving nothing. On copies of
+  the relwithdebinfo build: a read-only exe, an exe held open without delete
+  sharing, and a run killed mid-patch (relaunch logged both leftovers removed,
+  then patched). A stale `.icon-new` was removed on the next launch, and kept
+  while a second instance of the same exe ran.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
