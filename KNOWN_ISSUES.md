@@ -236,6 +236,35 @@ repro steps; the entry says where the problem is and how it would show.
   hook lands on the wrong function in one of the two builds.
 - **Next step:** diff the hooked addresses between the base and TU3 codegen.
 
+### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
+
+- **Status:** investigating
+- **Area:** HUD / UI, events
+- **Tracking:** fix session `ots-ui`
+- **Symptom:** during Own the Spot and Own the Lot events, UI elements flicker
+  in and out or are displayed incorrectly.
+- **Cause so far:** unknown. Not yet checked whether the emulated renderer (F5)
+  shows it.
+- **Next step:** get a screenshot and an F10 capture mid-event. Check whether
+  the event HUD is dropped by the menu-context draw suppression
+  (`YieldForMenus`, the steady-safe screen list in `skate3_native_scene.cpp`).
+
+### KI-35: Team-member portraits in character creation show old photos
+
+- **Status:** investigating
+- **Area:** menus, skater portraits
+- **Tracking:** fix session `team-portraits`
+- **Symptom:** in the character creation menu, the photos of the additional
+  team-member skaters show images taken earlier in the game, from earlier
+  events.
+- **Cause so far:** unknown. Not yet checked whether the emulated renderer (F5)
+  shows it. Likely suspect: the one-shot skater-portrait render-to-texture
+  passes are skipped or never resolved, so the shared target keeps the last
+  photo drawn into it. PR #17 recently changed the portrait/menu suppress-mode
+  overrides.
+- **Next step:** reproduce, compare with F5, and take an F10 capture on the bad
+  screen.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
