@@ -1297,7 +1297,7 @@ repro steps; the entry says where the problem is and how it would show.
 ### KI-64: Raw guest loads in the capture path and render hooks
 
 - **Status:** fix in review, tested unattended. Awaiting an in-game test.
-- **Tracking:** rubensteezy/skate3recomp#PRNUM. Found while fixing KI-26 (#38).
+- **Tracking:** rubensteezy/skate3recomp#48. Found while fixing KI-26 (#38).
 - **Problem:** the frame build and the capture hooks read guest memory with
   raw `REX_LOAD`s on the guest render thread:
   - `src/skate3_native_scene.cpp`: `BuildItemFromMeshCached` read the mesh's
