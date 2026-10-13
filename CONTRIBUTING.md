@@ -11,9 +11,9 @@ screenshots are fine.
 
 ## Reporting Bugs
 
-Known bugs are listed in [docs/bug-tracker.md](docs/bug-tracker.md); check
-there first. A pull request that fixes a tracked bug names its ID (for
-example `Fixes BT-09`) and updates its row in the same change.
+Known bugs are listed in [KNOWN_ISSUES.md](KNOWN_ISSUES.md); check there
+first. A pull request that fixes a tracked bug names its id (for example
+`Fixes KI-16`) and updates its entry in the same change.
 
 Open an issue with:
 
