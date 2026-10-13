@@ -738,6 +738,38 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** confirm by reading the code, then send misses back to
   `g_miss_queue` with their kind kept.
 
+### KI-67: Mesh decodes that always fail are retried every frame
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming
+- **Tracking:** none yet. Found while fixing KI-27 (#39).
+- **Where:** `ProcessPrewarmEntry` → `PrewarmCommit` → the draw path in
+  `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** a failed mesh decode is committed with `mesh_valid=false` and
+  its in-flight key is released. The next draw-path miss calls
+  `EnqueueMeshMiss` again, with no negative cache or backoff (textures have
+  `RetryBackoff`, meshes don't). So a mesh that can never decode costs a
+  pointless worker decode every frame it's visible. #39's new rejections are
+  cheap and run before any copy, but other failures still do the full work.
+- **Fix:** a per-mesh fail count with backoff, like `GuestTexture::fail_count`.
+
+### KI-68: Prewarm log counts are misleading
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, diagnostics
+- **Tracking:** none yet. Found while fixing KI-27 (#39).
+- **Where:** `PrewarmCommit` and the settle warm loop (the `need_mesh` branch
+  near the `REVALIDATE` debug log) in `src/skate3_native_scene_gpu.cpp`.
+- **Problems:**
+  - `g_prewarm_done` counts every result, including `mesh_valid=false` and
+    texture-only results, so "N meshes decoded" isn't the number of
+    successful decodes. Baseline comparisons between agent runs used it.
+  - The settle loop's comment says failures are "logged + counted" through the
+    draw path, but the failure itself isn't counted there; only the later
+    draw-path retry is (`g_rr_decode_fail`).
+- **Fix:** count successes separately (or rename the log field), and fix the
+  comment.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
