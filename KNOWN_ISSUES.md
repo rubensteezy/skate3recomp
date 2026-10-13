@@ -414,6 +414,41 @@ repro steps; the entry says where the problem is and how it would show.
   game sound uses context 31. Compare with upstream rexglue-sdk, then listen
   for a missing or clipped sound at the moment the line is logged.
 
+### KI-46: Long user-data paths silently drop a VFS overlay alias
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** app startup, file system overlay
+- **Tracking:** none yet. Found while fixing KI-19 (#31).
+- **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
+  / `CreateOverlayDirectory`.
+- **Problem:** with a long user-data path, the overlay folder
+  `<cache_root>\vfs_big_directory_aliases\data\state\livingworldentities\pedestrian\plugin`
+  passes CreateDirectoryW's 248-character limit and is never created. The
+  failure is only counted, never logged. A user with a long AppData or
+  portable path would silently lose the pedestrian plugin alias.
+- **Evidence:** a test run from a long scratch path logged "overlay with 10
+  aliases"; the same build from a short path logged 11.
+- **Next step:** log which alias failed. Then use `\\?\` long paths or a
+  shorter overlay root.
+
+### KI-47: Other startup filesystem calls can throw
+
+- **Status:** open · **Severity:** low
+- **Area:** app startup
+- **Tracking:** none yet. Found while fixing KI-19 (#31). Code reading only,
+  untested.
+- **Where:**
+  - `src/skate3_app_common.cpp`: `std::filesystem::exists` at the
+    portable.txt check, the config/settings paths, `FirstExistingFontPath`,
+    the JP font path, and the profiles/config checks in the defaults setup.
+    Also `is_directory(defaults.game_data_root)`, and
+    `is_directory(portable_saves)` in the post-launch setup.
+  - `src/skate3_user_settings.cpp`: `exists(profiles_path)`.
+  - `src/skate3_screenshot.cpp`, `ScreenshotPath`: `absolute(...)`.
+- **Problem:** the same failure as KI-19. A permissions error on one of these
+  paths becomes an uncaught exception.
+- **Fix:** one sweep to the `error_code` overloads.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
