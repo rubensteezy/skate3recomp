@@ -121,20 +121,6 @@ repro steps; the entry says where the problem is and how it would show.
   error partway through a folder), which would end startup with an exception.
 - **Fix:** step with `increment(ec)`.
 
-### KI-20: Depth-view caches compare textures by pointer
-
-- **Status:** open · **Severity:** low–medium · was BT-13
-- **Area:** native renderer, post effects
-- **Where:** `s_pfx_depth_tex` (photo FX in `RenderScene`), and
-  `ao_depth_srv_of`, `ssr_depth_srv_of`, `vol_depth_srv_of`
-  (`src/skate3_native_scene_post.cpp`)
-- **Problem:** a rebuilt depth texture is detected by comparing pointers. A
-  texture freed and reallocated at the same address keeps the old view,
-  possibly with the wrong MSAA dimension. The photo FX one is most exposed
-  because it can sit idle across several rebuilds (for example MSAA changes
-  while the photo editor is closed).
-- **Fix idea:** a generation counter bumped on every depth rebuild.
-
 ### KI-21: Occlusion culling silently inactive with SSAO off
 
 - **Status:** open · **Severity:** low–medium · was BT-14
@@ -609,6 +595,50 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-20: Depth-view caches compare textures by pointer
+
+- **Status:** fix in review, awaiting in-game test · **Severity:** low–medium
+  · was BT-13
+- **Area:** native renderer, post effects
+- **Where:** the photo-postfx depth view `pfx_srv[7]` (`RenderScene`,
+  `src/skate3_native_scene_gpu.cpp`), the SSAO, SSR and volumetric depth
+  views in `ApplySsaoPass`, `ApplySsrPass` and `ApplyVolumetricPass`
+  (`src/skate3_native_scene_post.cpp`), and the guest-output view
+  `output_srv_slot` (`EnsurePipeline`, `EnsureMenuBlurStandalone`)
+- **Problem:** each view remembered the texture pointer it was built for and
+  was rebuilt only when `g_r.depth` (or `context.guest_output`) changed
+  address. A texture freed and reallocated at the same address kept the old
+  view, possibly with the wrong MSAA dimension. The photo-postfx view was the
+  worst: nothing retired it on a depth rebuild, so it could sit idle across
+  several MSAA or resolution changes while the photo editor was closed. The
+  SSAO, SSR and volumetric views were already retired in
+  `EnsureOutputSizedTargets`, so for them the pointer check was only a second
+  line of defence. The guest-output view had the same hazard one layer down:
+  the RHI deletes a resized output's wrapper and allocates its replacement
+  straight away, so the new wrapper can come back at the old address.
+- **Fix:** `RendererState::depth_gen` is bumped every time
+  `EnsureOutputSizedTargets` creates the scene depth texture (the MSAA
+  targets are rebuilt in the same block). The four depth views store the
+  generation they were built for (`*_depth_srv_gen`, `pfx_depth_srv_gen`)
+  and rebuild on a mismatch, a single integer compare per pass.
+  `EnsureOutputSizedTargets` now also retires the photo-postfx view with the
+  old depth texture. The guest-output view moved into `EnsureOutputSrv`,
+  which keys it on the pointer plus the output size; the RHI only replaces a
+  wrapper on a size change (or, on Vulkan, a new image view) or when it
+  evicts an old mailbox entry.
+- **Tested:** relwithdebinfo, unattended boots (`--skate3_demo_path=true`)
+  to gameplay on D3D12 (MSAA x4, SSR on) and Vulkan (MSAA x2,
+  `resolution_scale=1`, SSR on), no errors and no device loss. A
+  test-only build that cycled `skate3_native_render_scene_msaa` through
+  1/2/4/8 every 300 frames rebuilt the depth texture 78 times on D3D12 and
+  74 on Vulkan. 11 and 20 of those rebuilds got the old texture's address
+  back with a different sample count, which the old pointer check would
+  have missed. Every SSAO view (D3D12) and SSR and volumetric view (Vulkan,
+  SSAO off) was rebuilt for the new generation, with no errors and no
+  device loss. Not yet tested: the photo editor's depth effects after an
+  MSAA or render-scale change, and a window resize for the guest-output
+  view.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 

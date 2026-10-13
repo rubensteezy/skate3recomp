@@ -498,14 +498,25 @@ struct RendererState {
   nrhi::Pipeline* pso_hair_b = nullptr;
   nrhi::Format rtv_format = nrhi::Format::kUnknown;
   nrhi::Texture* depth = nullptr;
+  // Bumped every time EnsureOutputSizedTargets (re)creates `depth` (and the
+  // MSAA targets with it). Views of the scene depth cache the generation
+  // they were built for instead of the texture pointer: a freed and
+  // reallocated depth texture can come back at the same address with a
+  // different sample count (KI-20). Starts at 1 so a zeroed cache field
+  // never matches a live buffer.
+  uint32_t depth_gen = 1;
   uint32_t depth_width = 0;
   // HoM bones share the scene color, but test against an independently
   // cleared depth plane so the body cannot obscure its injury overlay.
   nrhi::Texture* hom_depth = nullptr;
   uint32_t depth_height = 0;
   // Cached guest-output texture identity (context.guest_output) for change
-  // detection: the presenter recreates the output image on resize.
+  // detection: the presenter recreates the output image on resize. Keyed on
+  // pointer + size (see EnsureOutputSrv): a recreated wrapper can reuse the
+  // old address.
   nrhi::Texture* rtv_resource = nullptr;
+  uint32_t rtv_resource_width = 0;
+  uint32_t rtv_resource_height = 0;
   // MSAA: the scene draws into msaa_color (+ MSAA depth) and a fullscreen
   // pass averages the samples into the guest output texture (the RHI command
   // stream has no resolve copy).
@@ -597,6 +608,8 @@ struct RendererState {
   // Fixed SRV views: 0/1 = pfx_full, 2/3 = pfx_half, 4 = quarter, 5 =
   // packed depth, 6 = LUT, 7 = the native MSAA/1x depth resource.
   nrhi::TextureView* pfx_srv[8] = {};
+  // depth_gen pfx_srv[7] (the photo-postfx scene-depth view) was built for.
+  uint32_t pfx_depth_srv_gen = 0;
   bool pfx_srv_allocated = false;
   uint32_t pfx_width = 0, pfx_height = 0;
   bool pfx_ready = false;
@@ -639,7 +652,7 @@ struct RendererState {
   nrhi::TextureView* ao_luma_srv = nullptr;
   // View of the scene depth buffer, re-pointed when depth is rebuilt.
   nrhi::TextureView* ao_depth_srv = nullptr;
-  nrhi::Texture* ao_depth_srv_of = nullptr;
+  uint32_t ao_depth_srv_gen = 0;  // depth_gen the view was built for
   uint32_t ao_width = 0, ao_height = 0;          // AO raster (half or full res)
   uint32_t ao_lin_width = 0, ao_lin_height = 0;  // linear depth (always full)
   uint32_t ao_msaa = 0;
@@ -754,7 +767,7 @@ struct RendererState {
   nrhi::TextureView* ssr_lin_srv = nullptr;
   // Scene-depth SRV for the own linearize, re-pointed on depth rebuilds.
   nrhi::TextureView* ssr_depth_srv = nullptr;
-  nrhi::Texture* ssr_depth_srv_of = nullptr;
+  uint32_t ssr_depth_srv_gen = 0;  // depth_gen the view was built for
   uint32_t ssr_width = 0, ssr_height = 0;  // half-res raster
   uint32_t ssr_lin_width = 0, ssr_lin_height = 0;
   uint32_t ssr_msaa = 0;  // linearize-variant PSO latch
@@ -787,7 +800,7 @@ struct RendererState {
   uint32_t vol_lin_width = 0, vol_lin_height = 0;
   // Scene-depth SRV for the own linearize, re-pointed on depth rebuilds.
   nrhi::TextureView* vol_depth_srv = nullptr;
-  nrhi::Texture* vol_depth_srv_of = nullptr;
+  uint32_t vol_depth_srv_gen = 0;  // depth_gen the view was built for
   uint32_t vol_msaa = 0;  // linearize-variant PSO latch
   bool vol_failed = false;
   // Per-frame handoff to ApplyHdrPost: the finished shaft plane and the
@@ -1083,6 +1096,8 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context);
 // Umbrella builder: runs every group above (plus the base device/queue
 // setup) and latches g_r.failed on an unrecoverable failure.
 bool EnsurePipeline(const NativeGuestOutputRenderContext& context);
+// Re-points g_r.output_srv_slot when the guest output was replaced.
+void EnsureOutputSrv(const NativeGuestOutputRenderContext& context);
 // Shader-desc helper: pairs the HLSL source with its offline-compiled
 // SPIR-V blob (Vulkan) by {file, entry, variant}.
 nrhi::ShaderDesc MakeShaderDesc(nrhi::ShaderStage stage, const char* file,
