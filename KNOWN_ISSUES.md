@@ -756,7 +756,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-24: XUID parsing and TOML escaping in user settings
 
-- **Status:** fix in review (branch `fix/ki24-xuid-toml`), tested
+- **Status:** fix in review in rubensteezy/skate3recomp#36, tested
   unattended · **Severity:** low · was BT-17
 - **Where:** `ParseXuidString` and `TomlString` in
   `src/skate3_user_settings.cpp` (reader and writer of `profiles.toml`)
