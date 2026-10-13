@@ -236,19 +236,6 @@ repro steps; the entry says where the problem is and how it would show.
   hook lands on the wrong function in one of the two builds.
 - **Next step:** diff the hooked addresses between the base and TU3 codegen.
 
-### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
-
-- **Status:** investigating
-- **Area:** HUD / UI, events
-- **Tracking:** fix session `ots-ui`
-- **Symptom:** during Own the Spot and Own the Lot events, UI elements flicker
-  in and out or are displayed incorrectly.
-- **Cause so far:** unknown. Not yet checked whether the emulated renderer (F5)
-  shows it.
-- **Next step:** get a screenshot and an F10 capture mid-event. Check whether
-  the event HUD is dropped by the menu-context draw suppression
-  (`YieldForMenus`, the steady-safe screen list in `skate3_native_scene.cpp`).
-
 ### KI-35: Team-member portraits in character creation show old photos
 
 - **Status:** investigating
@@ -425,6 +412,27 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
+
+- **Status:** fixed in rubensteezy/skate3recomp#PRNUM. Confirmed in-game on
+  D3D12 and Vulkan on 2026-10-12.
+- **Symptom:** during Own the Lot (and Own the Spot) events the score and
+  timer, objective text, challenge list and spot markers flickered in and out
+  or drew incompletely. Native renderer only: the cause is in the native
+  renderer's own vertex upload, so the emulated renderer (F5) is not affected.
+- **Cause:** the in-world spline pass (the neon boundary/marker strips) and the
+  HUD/2D pass share one per-frame upload region for their vertices, splines
+  first. An Own the Lot boundary is up to 54 strips, about 1.03 MB, and the
+  region was 1 MB. With the whole outline in view the spline pass filled it,
+  so its last strip and every HUD draw after it were skipped without a log
+  line (7 HUD draws skipped per frame in a measured run). The camera moving
+  the outline in and out of view made the HUD pop in and out.
+- **Fix:** the region (`RendererState::kUiRegionSize`,
+  `skate3_native_scene_gpu_internal.h`) is now 4 MB, and the spline pass in
+  `RenderScene` stops at `kUiSplineBudget`, 1 MB short of the end, so the HUD
+  always has room. A skipped spline or 2D draw now logs a rolling-capped
+  "UI vertex region full" warning.
 
 ### Reviewed and ruled out (code review)
 
