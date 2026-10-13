@@ -2699,6 +2699,52 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
 
 }  // namespace
 
+static_assert(RendererState::kBoneRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kShadowCbRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kUiRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kPfxCbRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kScreenFxCbRegions <= UploadRingRegions::kMaxRegions);
+
+void UploadRingRegions::Acquire(nrhi::Device* device) {
+  const uint64_t completed = device->CompletedSubmission();
+  uint32_t in_flight = 0;
+  for (uint32_t i = 0; i < count_; ++i) {
+    in_flight += submission_[i] > completed ? 1u : 0u;
+  }
+  // A new high of half the ring or more means the GPU lags far enough to
+  // matter; at most count_ lines per ring per run.
+  if (in_flight > in_flight_high_) {
+    in_flight_high_ = in_flight;
+    if (in_flight * 2 >= count_) {
+      REXLOG_INFO("upload ring {}: {}/{} regions in flight (completed submission {})",
+                  name_, in_flight, count_, completed);
+    }
+  }
+  // Round-robin from the last region: the next one is normally long done.
+  uint32_t oldest = (current_ + 1) % count_;
+  for (uint32_t i = 1; i <= count_; ++i) {
+    const uint32_t r = (current_ + i) % count_;
+    if (submission_[r] <= completed) {
+      current_ = r;
+      return;
+    }
+    if (submission_[r] < submission_[oldest]) {
+      oldest = r;
+    }
+  }
+  // Every region is still referenced by unfinished GPU work. nrhi can't
+  // wait on a fence, so reuse the oldest one (the pre-KI-16 behavior) and
+  // say so: the frame may show stale HUD, bones or constants.
+  const uint32_t n = exhausted_++;
+  if (n < 8 || (n & 1023u) == 0) {
+    REXLOG_WARN(
+        "upload ring {}: all {} regions in flight (completed submission {}, oldest "
+        "region needs {}); reusing it ({} times so far)",
+        name_, count_, completed, submission_[oldest], n + 1);
+  }
+  current_ = oldest;
+}
+
 // ---- EnsurePipeline helpers ------------------------------------------------
 // Split from the former ~1,000-line EnsurePipeline: one resource
 // group per function, bodies unchanged. Every helper is idempotent (guarded
@@ -3586,10 +3632,10 @@ bool EnsurePhotoFxPipeline(const NativeGuestOutputRenderContext& context) {
       device->Unmap(g_r.pfx_lut_upload);
     }
     if (g_r.pfx_cb == nullptr) {
-      // 8 pass slots x 4 KB x 4 frames in flight.
-      // 10 slots per frame region: depth pack + accum feed + 6 passes +
-      // accum mode 2 + the debug view.
-      g_r.pfx_cb = CreateUploadBuffer(device, 10u * 4096u * 4u);
+      // kPfxCbSlots 4 KB slots per frame region, kPfxCbRegions regions.
+      g_r.pfx_cb = CreateUploadBuffer(
+          device, size_t(RendererState::kPfxCbSlots) * 4096u *
+                      RendererState::kPfxCbRegions);
       g_r.pfx_cb_ptr = g_r.pfx_cb
                            ? static_cast<uint8_t*>(device->Map(g_r.pfx_cb))
                            : nullptr;
@@ -8076,9 +8122,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // Reset this frame's bone ring region (shared by the shadow casters and
   // the main pass: the shadow pass allocates first, the main pass appends).
   const uint64_t frame_number = g_frames_rendered.load(std::memory_order_relaxed);
-  const uint32_t bone_region =
-      uint32_t(frame_number % RendererState::kBoneRegions) *
-      RendererState::kBoneRegionSize;
+  const uint32_t bone_slot = g_r.bone_regions.Region(context.device, frame_number);
+  const uint32_t bone_region = bone_slot * RendererState::kBoneRegionSize;
   // A neutral b2 block prevents ordinary draws from inheriting body opacity.
   std::memset(g_r.bone_ring_cpu + bone_region, 0, 512u);
   g_r.bone_ring_offset = 512u;
@@ -8331,7 +8376,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // shader is also gated by sh_misc.y).
   if (g_r.shadow_cb != nullptr) {
     const uint32_t cb_offset =
-        uint32_t(frame_number % RendererState::kShadowCbRegions) *
+        g_r.shadow_cb_regions.Region(context.device, frame_number) *
         RendererState::kShadowCbSlice;
     float* cb = reinterpret_cast<float*>(g_r.shadow_cb_cpu + cb_offset);
     std::memset(cb, 0, RendererState::kShadowCbSlice);
@@ -10155,9 +10200,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           }
         }
       }
-      const uint32_t region =
-          uint32_t(frame_number % RendererState::kBoneRegions) *
-          RendererState::kRopaRegionSize;
+      const uint32_t region = bone_slot * RendererState::kRopaRegionSize;
       const uint32_t bytes = uint32_t(want_floats * sizeof(float));
       if (ng > 0 && total >= 0.5f && newest != nullptr &&
           buffers.vb_view.stride == 56 &&
@@ -10948,7 +10991,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     return it->second.valid ? &it->second : &g_r.white;
   };
   const uint32_t ui_region =
-      uint32_t(frame_number % RendererState::kUiRegions) * RendererState::kUiRegionSize;
+      g_r.ui_regions.Region(context.device, frame_number) * RendererState::kUiRegionSize;
   uint32_t ui_offset = 0;
   // A skipped spline strip or HUD draw is a visible hole; name it in the log
   // instead of dropping it silently (rolling-capped).
@@ -11179,7 +11222,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     cmd->SetBindingLayout(g_r.layout);
     if (g_r.shadow_cb != nullptr) {
       const uint32_t cb_offset =
-          uint32_t(frame_number % RendererState::kShadowCbRegions) *
+          g_r.shadow_cb_regions.Region(context.device, frame_number) *
         RendererState::kShadowCbSlice;
       cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
       cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
@@ -11343,7 +11386,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
            {-1.0f, 0.5f, 0, 0},
            {-0.5f, -0.888888896f, 1.0f, 1.77777779f}},
       };
-      const uint32_t cb_slot_base = uint32_t(frame_number % 4) * 10;
+      const uint32_t cb_slot_base =
+          g_r.pfx_cb_regions.Region(context.device, frame_number) *
+          RendererState::kPfxCbSlots;
       uint32_t cb_slot_next = 0;
       const int32_t pfx_debug =
           REXCVAR_GET(skate3_native_render_scene_photo_native_debug);
@@ -11583,7 +11628,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cmd->SetBindingLayout(g_r.layout);
       if (g_r.shadow_cb != nullptr) {
         const uint32_t cb_offset =
-            uint32_t(frame_number % RendererState::kShadowCbRegions) *
+            g_r.shadow_cb_regions.Region(context.device, frame_number) *
         RendererState::kShadowCbSlice;
         cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
         cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
@@ -11615,7 +11660,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (vignette != nullptr && vignette != &g_r.white && vignette->valid &&
           vignette->srv != nullptr) {
         const uint64_t cb_offset =
-            uint64_t(frame_number % RendererState::kScreenFxCbRegions) *
+            uint64_t(g_r.screen_fx_cb_regions.Region(context.device, frame_number)) *
             RendererState::kScreenFxCbSlice;
         uint8_t* dst = g_r.screen_fx_cb_ptr + cb_offset;
         std::memset(dst, 0, RendererState::kScreenFxCbSlice);
@@ -11672,7 +11717,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         cmd->SetBindingLayout(g_r.layout);
         if (g_r.shadow_cb != nullptr) {
           const uint32_t frame_cb_offset =
-              uint32_t(frame_number % RendererState::kShadowCbRegions) *
+              g_r.shadow_cb_regions.Region(context.device, frame_number) *
               RendererState::kShadowCbSlice;
           cmd->SetConstantBuffer(6, g_r.shadow_cb, frame_cb_offset);
         }
