@@ -849,6 +849,22 @@ repro steps; the entry says where the problem is and how it would show.
   fail. Moot if #18 removes this code.
 - **Fix:** use a growing buffer and check for `ERROR_INSUFFICIENT_BUFFER`.
 
+### KI-74: SDK cvar overrides drop user changes made while held
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, settings
+- **Tracking:** none yet. Found while fixing KI-30 (#42).
+- **Where:** `SdkCvarOverride` in `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** while an override holds a cvar, `Release` restores `saved_`, so
+  any write another thread makes in the meantime is dropped. That includes
+  the options menu, the settings overlay and the console. There's also a
+  microsecond window where the F12 dialog sees "not held", the user clicks,
+  and the render thread acquires before the write lands. #42 adds a warning,
+  "SDK cvar override on ... was overwritten while held", that shows when this
+  happens.
+- **Next step:** if that warning ever appears, add a "user set while held" path
+  that updates `saved_`.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
