@@ -4238,22 +4238,21 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
       g_r.hom_depth = nullptr;
     }
     if (g_r.depth) {
-      // The AO/SSR/volumetric scene-depth SRVs alias this texture and
-      // re-point on pointer identity; heap reuse can hand the NEW depth
-      // texture the OLD one's address, so that comparison must never be
-      // the only invalidation. Retire the views with the buffer they view:
-      // a stale view kept sampling the retired depth image (still in
-      // attachment layout), a GPU fault and device hang on Vulkan.
-      nrhi::TextureView** depth_views[3] = {
-          &g_r.ao_depth_srv, &g_r.ssr_depth_srv, &g_r.vol_depth_srv};
-      nrhi::Texture** depth_views_of[3] = {
-          &g_r.ao_depth_srv_of, &g_r.ssr_depth_srv_of, &g_r.vol_depth_srv_of};
-      for (int v = 0; v < 3; ++v) {
-        if (*depth_views[v] != nullptr) {
-          g_r.device->DestroyDeferred(*depth_views[v]);
-          *depth_views[v] = nullptr;
+      // The AO/SSR/volumetric and photo-postfx scene-depth SRVs alias this
+      // texture. Retire them with the buffer they view: a stale view kept
+      // sampling the retired depth image (still in attachment layout), a
+      // GPU fault and device hang on Vulkan. Their users also re-check
+      // depth_gen (bumped below), never the texture pointer, which heap
+      // reuse can hand back unchanged (KI-20).
+      nrhi::TextureView** depth_views[4] = {&g_r.ao_depth_srv,
+                                            &g_r.ssr_depth_srv,
+                                            &g_r.vol_depth_srv,
+                                            &g_r.pfx_srv[7]};
+      for (nrhi::TextureView** view : depth_views) {
+        if (*view != nullptr) {
+          g_r.device->DestroyDeferred(*view);
+          *view = nullptr;
         }
-        *depth_views_of[v] = nullptr;
       }
       g_r.device->DestroyDeferred(g_r.depth);
       g_r.depth = nullptr;
@@ -4279,6 +4278,7 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
       g_r.failed = true;
       return false;
     }
+    ++g_r.depth_gen;
     g_r.depth_width = width;
     g_r.depth_height = height;
 
@@ -4478,22 +4478,36 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
     return false;
   }
 
-  if (g_r.rtv_resource != context.guest_output) {
-    // The presenter recreated the output image (resize). Render-target
-    // binding is by texture now (the old heap-slot-0 RTV is gone); re-point
-    // the cached identity and the sampled view of the output (blur source /
-    // photo passes).
-    if (g_r.output_srv_slot) {
-      device->DestroyDeferred(g_r.output_srv_slot);
-      g_r.output_srv_slot = nullptr;
-    }
-    nrhi::TextureViewDesc vd;
-    vd.mip_levels = 1;
-    g_r.output_srv_slot = device->CreateTextureView(context.guest_output, vd);
-    g_r.output_srv_allocated = g_r.output_srv_slot != nullptr;
-    g_r.rtv_resource = context.guest_output;
-  }
+  EnsureOutputSrv(context);
   return true;
+}
+
+void EnsureOutputSrv(const NativeGuestOutputRenderContext& context) {
+  // The presenter recreated the output image (resize). Render-target
+  // binding is by texture now (the old heap-slot-0 RTV is gone); re-point
+  // the cached identity and the sampled view of the output (blur source /
+  // photo passes). The pointer alone is not a safe identity: the RHI drops
+  // a resized output's wrapper and allocates its replacement straight away,
+  // so the new wrapper can land at the old address (KI-20). The size is
+  // part of the key, which catches every wrapper replacement the RHI makes
+  // for a resize.
+  if (g_r.rtv_resource == context.guest_output &&
+      g_r.rtv_resource_width == context.guest_output_width &&
+      g_r.rtv_resource_height == context.guest_output_height) {
+    return;
+  }
+  if (g_r.output_srv_slot) {
+    context.device->DestroyDeferred(g_r.output_srv_slot);
+    g_r.output_srv_slot = nullptr;
+  }
+  nrhi::TextureViewDesc vd;
+  vd.mip_levels = 1;
+  g_r.output_srv_slot =
+      context.device->CreateTextureView(context.guest_output, vd);
+  g_r.output_srv_allocated = g_r.output_srv_slot != nullptr;
+  g_r.rtv_resource = context.guest_output;
+  g_r.rtv_resource_width = context.guest_output_width;
+  g_r.rtv_resource_height = context.guest_output_height;
 }
 
 namespace {
@@ -11263,10 +11277,13 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         g_r.pfx_lut_uploaded = true;
       }
       // Native depth SRV (re-pointed when the depth texture is rebuilt on
-      // output resize; D32 textures view as R32_FLOAT automatically).
+      // resize / MSAA change; D32 textures view as R32_FLOAT automatically).
+      // Keyed on depth_gen, not the texture pointer: this view can sit idle
+      // across several rebuilds while the photo editor is closed, and a
+      // rebuilt depth texture may reuse the old address (KI-20).
       {
-        static nrhi::Texture* s_pfx_depth_tex = nullptr;
-        if (g_r.pfx_srv[7] == nullptr || s_pfx_depth_tex != g_r.depth) {
+        if (g_r.pfx_srv[7] == nullptr ||
+            g_r.pfx_depth_srv_gen != g_r.depth_gen) {
           if (g_r.pfx_srv[7] != nullptr) {
             g_r.device->DestroyDeferred(g_r.pfx_srv[7]);
             g_r.pfx_srv[7] = nullptr;
@@ -11279,7 +11296,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
             sd.mip_levels = 1;
           }
           g_r.pfx_srv[7] = context.device->CreateTextureView(g_r.depth, sd);
-          s_pfx_depth_tex = g_r.depth;
+          g_r.pfx_depth_srv_gen = g_r.depth_gen;
         }
       }
       // (The guest-output view, the finished native frame = the chain's

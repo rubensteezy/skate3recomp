@@ -305,7 +305,7 @@ bool ApplySsaoPass(const NativeGuestOutputRenderContext& context,
   }
   // Scene-depth SRV, re-pointed when the depth buffer is rebuilt (resize /
   // MSAA change). D32 textures view as R32_FLOAT automatically.
-  if (g_r.ao_depth_srv == nullptr || g_r.ao_depth_srv_of != g_r.depth) {
+  if (g_r.ao_depth_srv == nullptr || g_r.ao_depth_srv_gen != g_r.depth_gen) {
     if (g_r.ao_depth_srv != nullptr) {
       device->DestroyDeferred(g_r.ao_depth_srv);
       g_r.ao_depth_srv = nullptr;
@@ -322,7 +322,7 @@ bool ApplySsaoPass(const NativeGuestOutputRenderContext& context,
       g_r.ao_failed = true;
       return false;
     }
-    g_r.ao_depth_srv_of = g_r.depth;
+    g_r.ao_depth_srv_gen = g_r.depth_gen;
   }
 
   // b0 rows (see ssao.hlsl cbuffer C): size, projection, tuning, blur axis.
@@ -841,7 +841,8 @@ bool ApplySsrPass(const NativeGuestOutputRenderContext& context,
       g_r.ssr_lin_height = height;
     }
     // Scene-depth SRV, re-pointed when the depth buffer is rebuilt.
-    if (g_r.ssr_depth_srv == nullptr || g_r.ssr_depth_srv_of != g_r.depth) {
+    if (g_r.ssr_depth_srv == nullptr ||
+        g_r.ssr_depth_srv_gen != g_r.depth_gen) {
       if (g_r.ssr_depth_srv != nullptr) {
         device->DestroyDeferred(g_r.ssr_depth_srv);
         g_r.ssr_depth_srv = nullptr;
@@ -858,7 +859,7 @@ bool ApplySsrPass(const NativeGuestOutputRenderContext& context,
         g_r.ssr_failed = true;
         return bail();
       }
-      g_r.ssr_depth_srv_of = g_r.depth;
+      g_r.ssr_depth_srv_gen = g_r.depth_gen;
     }
   }
   nrhi::Texture* const lin_tex =
@@ -1177,7 +1178,8 @@ bool ApplyVolumetricPass(const NativeGuestOutputRenderContext& context,
       g_r.vol_lin_height = height;
     }
     // Scene-depth SRV, re-pointed when the depth buffer is rebuilt.
-    if (g_r.vol_depth_srv == nullptr || g_r.vol_depth_srv_of != g_r.depth) {
+    if (g_r.vol_depth_srv == nullptr ||
+        g_r.vol_depth_srv_gen != g_r.depth_gen) {
       if (g_r.vol_depth_srv != nullptr) {
         device->DestroyDeferred(g_r.vol_depth_srv);
         g_r.vol_depth_srv = nullptr;
@@ -1194,7 +1196,7 @@ bool ApplyVolumetricPass(const NativeGuestOutputRenderContext& context,
         g_r.vol_failed = true;
         return false;
       }
-      g_r.vol_depth_srv_of = g_r.depth;
+      g_r.vol_depth_srv_gen = g_r.depth_gen;
     }
   }
 
@@ -1919,17 +1921,7 @@ bool EnsureMenuBlurStandalone(const NativeGuestOutputRenderContext& context) {
   if (g_r.menu_blur_tex[0] == nullptr) {
     return false;
   }
-  if (g_r.rtv_resource != context.guest_output) {
-    if (g_r.output_srv_slot) {
-      context.device->DestroyDeferred(g_r.output_srv_slot);
-      g_r.output_srv_slot = nullptr;
-    }
-    nrhi::TextureViewDesc vd;
-    vd.mip_levels = 1;
-    g_r.output_srv_slot = context.device->CreateTextureView(context.guest_output, vd);
-    g_r.output_srv_allocated = g_r.output_srv_slot != nullptr;
-    g_r.rtv_resource = context.guest_output;
-  }
+  EnsureOutputSrv(context);
   return g_r.output_srv_slot != nullptr;
 }
 
