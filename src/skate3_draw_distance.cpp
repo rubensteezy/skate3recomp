@@ -37,10 +37,12 @@
 #include "generated/skate3_init.h"
 #include "native/skate3_native_guest_read.h"
 #include "skate3_demo_path.h"
+#include "skate3_guest_heap_diag.h"
 #include "skate3_native_scene.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -78,6 +80,16 @@ REXCVAR_DEFINE_DOUBLE(skate3_draw_distance_stream_probe, 0.0, "Skate 3",
                       "neighbouring cells at this radius loads them before "
                       "they are visible. 0 = original console behavior.")
     .range(0.0, 1000.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_draw_distance_stream_probe_reserve_mb, 10.0,
+                      "Skate 3",
+                      "Keep at least this many MB free in the game's streaming "
+                      "heap while pre-streaming: probe cells beyond what fits "
+                      "are unloaded, farthest first. Menus such as Create-a-"
+                      "Character allocate ~8 MB from the same 39 MB heap and "
+                      "fail (crash or hang) without this headroom. 0 = no "
+                      "limit.")
+    .range(0.0, 30.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(skate3_draw_distance_debug, false, "Skate 3",
                     "Log draw-distance diagnostics: programmed cull thresholds, "
@@ -255,6 +267,76 @@ struct ProbeCache {
   ProbeRecord records[160];
 };
 ProbeCache g_probe_cache[2];
+
+// Probe cells live in the same fixed 39 MB StreamerHeap (category
+// WorldStream) as everything the game streams for menus; Create-a-Character
+// alone takes ~8 MB on entry. At a 300 m probe radius the extra cells filled
+// the heap, and the CAC part-data allocation returned NULL (crash) or a
+// recipe allocation did (hang). So the number of probe records admitted per
+// gather is capped and the cap tracks the heap's free space: below the
+// reserve it shrinks by a quarter of what was admitted (the farthest cells
+// go first, since records are distance-sorted), above reserve + margin it
+// grows by one. Changes are spaced a second apart so unloads and loads have
+// landed before the next decision, and growth waits for the focus's set to
+// be resident. Slots as for g_probe_cache.
+struct ProbeBudget {
+  int allowance = 64;
+  int admitted = 0;
+  int64_t last_change_ms = 0;
+};
+ProbeBudget g_probe_budget[2];
+
+constexpr uint32_t kProbeBudgetMarginBytes = 2u << 20;
+constexpr int64_t kProbeBudgetStepMs = 1000;
+
+int64_t SteadyMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+int UpdateProbeAllowance(uint8_t* base, ProbeBudget& budget, int focus_type,
+                         bool set_resident, bool debug) {
+  const double reserve_mb =
+      REXCVAR_GET(skate3_draw_distance_stream_probe_reserve_mb);
+  uint32_t free_bytes = 0;
+  if (reserve_mb <= 0.0 ||
+      !Skate3GuestHeapCategoryFreeBytes(base, "WorldStream", &free_bytes)) {
+    budget.allowance = 64;
+    return budget.allowance;
+  }
+  const uint32_t reserve = uint32_t(reserve_mb * 1024.0 * 1024.0);
+  const int64_t now = SteadyMs();
+  if (now - budget.last_change_ms < kProbeBudgetStepMs) {
+    return budget.allowance;
+  }
+  if (free_bytes < reserve) {
+    const int lowered =
+        std::max(0, budget.admitted - std::max(1, budget.admitted / 4));
+    if (lowered < budget.allowance) {
+      if (budget.admitted > lowered) {
+        REXLOG_INFO(
+            "draw_distance: stream probe type={} over budget (StreamerHeap "
+            "{:.1f} MB free, reserve {:.1f} MB): probe cells {} -> {}",
+            focus_type, free_bytes / 1048576.0, reserve_mb, budget.admitted,
+            lowered);
+      }
+      budget.allowance = lowered;
+      budget.last_change_ms = now;
+    }
+  } else if (free_bytes >= reserve + kProbeBudgetMarginBytes &&
+             budget.allowance < 64 && set_resident) {
+    ++budget.allowance;
+    budget.last_change_ms = now;
+    if (debug) {
+      REXLOG_INFO(
+          "draw_distance: stream probe type={} budget allows {} cells "
+          "(StreamerHeap {:.1f} MB free)",
+          focus_type, budget.allowance, free_bytes / 1048576.0);
+    }
+  }
+  return budget.allowance;
+}
 
 // F6 or gamepad LB+B (while skate3_draw_distance_debug is on): drop a
 // numbered marker line into the log so a visual event ("the trees just
@@ -597,6 +679,7 @@ extern "C" REX_FUNC(sub_8247B3A0) {
   if (record_count == vanilla_count) {
     // Nothing beyond the vanilla set this cycle (the fan held off, or it
     // found no new cells): leave the game's own gather output untouched.
+    g_probe_budget[focus_type == 2 ? 1 : 0].admitted = 0;
     return;
   }
   std::sort(records, records + record_count,
@@ -621,9 +704,13 @@ extern "C" REX_FUNC(sub_8247B3A0) {
   const double admit_radius =
       focus_type == 2 ? probe + double(cell_size) : probe;
   const float admit_dist_sq = float(admit_radius * admit_radius);
+  ProbeBudget& budget = g_probe_budget[focus_type == 2 ? 1 : 0];
+  const int allowance =
+      UpdateProbeAllowance(base, budget, focus_type, set_resident, debug);
   size_t kept = 0;
   size_t dropped = 0;
   size_t vanilla_seen = 0;
+  int probe_admitted = 0;
   for (size_t i = 0; i < record_count; ++i) {
     bool admit;
     if (records[i].vanilla) {
@@ -633,7 +720,11 @@ extern "C" REX_FUNC(sub_8247B3A0) {
       // Reserve room for every vanilla record still ahead in the sorted
       // order; they are admitted unconditionally and the 64 cap is hard.
       const size_t vanilla_ahead = vanilla_count - vanilla_seen;
-      admit = kept + vanilla_ahead < 64 && records[i].dist <= admit_dist_sq;
+      admit = kept + vanilla_ahead < 64 && records[i].dist <= admit_dist_sq &&
+              probe_admitted < allowance;
+      if (admit) {
+        ++probe_admitted;
+      }
     }
     if (!admit) {
       ++dropped;
@@ -645,6 +736,7 @@ extern "C" REX_FUNC(sub_8247B3A0) {
     ++kept;
   }
   record_count = kept;
+  budget.admitted = probe_admitted;
   for (size_t i = 0; i < record_count; ++i) {
     std::memcpy(base + out + 8 + i * 16, records[i].blob, 16);
   }

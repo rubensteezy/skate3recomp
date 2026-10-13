@@ -30,6 +30,8 @@
 //  - 0x82317884 small-block heap: no counters decoded, size only.
 // Addresses are for the TU3 image.
 
+#include "skate3_guest_heap_diag.h"
+
 #include "generated/skate3_init.h"
 
 #include <algorithm>
@@ -40,7 +42,9 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -571,4 +575,45 @@ extern "C" REX_FUNC(sub_8298E608) {
   }
   __imp__sub_8298E608(ctx, base);
 }
+
+bool Skate3GuestHeapCategoryFreeBytes(uint8_t* base, std::string_view category,
+                                      uint32_t* free_bytes) {
+  // Heap objects never move once the framework is up; resolve each category
+  // once and read the live counters on every call.
+  static std::mutex cache_mutex;
+  static std::vector<std::pair<std::string, uint32_t>> cache;
+  uint32_t object = 0;
+  {
+    std::lock_guard lock(cache_mutex);
+    for (const auto& [name, cached] : cache) {
+      if (name == category) {
+        object = cached;
+        break;
+      }
+    }
+    if (object == 0) {
+      const Layout layout = ReadLayout(base);
+      for (const Category& entry : layout.categories) {
+        if (entry.name != category) {
+          continue;
+        }
+        if (const Heap* heap = layout.HeapAt(entry.holders[1]);
+            heap && heap->vtable == kGeneralHeapVtable) {
+          object = heap->object;
+          cache.emplace_back(std::string(category), object);
+        }
+        break;
+      }
+    }
+  }
+  if (object == 0) {
+    return false;
+  }
+  const uint32_t size = LoadGuestU32(base, object + 12);
+  const uint32_t used = LoadGuestU32(base, object + 16);
+  *free_bytes = used < size ? size - used : 0;
+  return true;
+}
+#else
+bool Skate3GuestHeapCategoryFreeBytes(uint8_t*, std::string_view, uint32_t*) { return false; }
 #endif  // SKATE3_HAS_TITLE_UPDATE
