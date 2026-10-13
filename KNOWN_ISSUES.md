@@ -1389,7 +1389,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-61: Palette scoring rejects samples at the edges of very wide views
 
-- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM, tested
+- **Status:** fix in review in rubensteezy/skate3recomp#50, tested
   unattended · **Severity:** low–medium
 - **Area:** native renderer, ultrawide, skinned characters
 - **Where:** `RefinePaletteBase` (the `score` lambda) and `ScoreRigidAffine`
