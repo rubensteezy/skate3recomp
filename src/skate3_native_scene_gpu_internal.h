@@ -990,8 +990,14 @@ struct RendererState {
   // Last successfully resolved words-key per streamed-art site
   // (mesh << 1 | slot; slot 0 = diffuse override, 1 = decal override).
   // Serves the site's previous art while a new-mip-words decode is in
-  // flight (see resolve_fetch_words). Render thread only.
-  std::unordered_map<uint64_t, uint64_t> words_sticky;
+  // flight (see resolve_fetch_words). Render thread only. The routing maps
+  // here (words_sticky, tex_routes, tex_sticky, tex_pending_first) are
+  // stamped on every use and aged out by PruneTexRouting.
+  struct WordsStickySite {
+    uint64_t words_key = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<uint64_t, WordsStickySite> words_sticky;
   // (The fam 5/6 masks+normal t4/t5 descriptor-pair cache is gone: draws
   // bind both views directly via cmd->SetTexturePair(5, spec, normal);
   // pair descriptors are cached inside the backend, so texture replacement
@@ -1020,6 +1026,7 @@ struct RendererState {
     // and payload polls are suspended while held (the probes would read
     // the reused pool). A re-promote publishes fresh words and re-routes.
     bool demoted = false;
+    uint64_t last_used_frame = 0;
   };
   std::unordered_map<uint32_t, TexRoute> tex_routes;
   // Sticky texture serving (see resolve_texture in draw_item): the last
@@ -1042,12 +1049,17 @@ struct RendererState {
     // serve the previous occupant's art (skin on the hair, a composite mask
     // layer on the arms).
     uint64_t piece = 0;
+    uint64_t last_used_frame = 0;
   };
   std::unordered_map<uint64_t, TexStickySite> tex_sticky;
   // First frame a texture object resolved white-with-heal-in-flight:
   // brand-new items (no sticky fallback) skip drawing for a short window
   // instead of flashing white.
-  std::unordered_map<uint32_t, uint64_t> tex_pending_first;
+  struct PendingFirst {
+    uint64_t first_frame = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<uint32_t, PendingFirst> tex_pending_first;
   bool failed = false;
   bool announced = false;
 };

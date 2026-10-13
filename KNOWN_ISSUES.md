@@ -92,15 +92,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Fix idea:** gate each slot on `CompletedSubmission()`, or size the rings
   from the device's frames in flight.
 
-### KI-17: Texture routing maps grow without bound
-
-- **Status:** open · **Severity:** low–medium · was BT-10
-- **Area:** native renderer, texture cache
-- **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
-  `tex_pending_first` are only cleared by the debug cache flush, so they grow
-  for the whole session.
-- **Fix idea:** prune by `last_used_frame`, like `tex_store`.
-
 ### KI-18: Draw-distance slots never freed; LOD distances scaled in place
 
 - **Status:** open · **Severity:** low–medium · was BT-11
@@ -418,6 +409,27 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-17: Texture routing maps grew without bound
+
+- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM · **Severity:** low–medium · was BT-10
+- **Area:** native renderer, texture cache
+- **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
+  `tex_pending_first` were only cleared by the debug cache flush, so they grew
+  for the whole session.
+- **Fix:** every entry is stamped with `last_used_frame` when it is used, and
+  `PruneTexRouting` (in `skate3_native_scene_gpu.cpp`, run right after
+  `EvictTexStore`) sweeps the maps every 120 frames with the store LRU's idle
+  guard (45 s of wall-clock time, never less than 8× the detail-downgrade
+  hold). An idle route or sticky site is only dropped once its words key has
+  no valid decode in the store, because then it serves the same thing a fresh
+  entry would. Anything idle for 5 minutes goes regardless. An entry used this
+  frame is never dropped, so the Edit Skater piece-signature hold (KI-2) and
+  the streaming sticky serving (KI-1) keep their state while it matters.
+- **Stats:** the `native-scene: tex routing pruned N (routes= sticky=
+  words_sticky= pending_first= store=)` line logs at most once a minute when
+  something was pruned. The perf log line (`skate3_native_render_scene_perf_log`)
+  shows the sizes in `store[...]` too.
 
 ### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
 
