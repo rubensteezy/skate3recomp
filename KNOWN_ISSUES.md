@@ -814,6 +814,41 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** check whether the popup layout uses the +0 field at all, or
   needs another flag to show a title.
 
+### KI-72: The Defender trojan trigger still ships on main
+
+- **Status:** open · **Severity:** medium (blocks the next release)
+- **Area:** Windows release, exe icon
+- **Tracking:** rubensteezy/skate3recomp#18 (open). Raised again while fixing
+  KI-29 (#41).
+- **Where:** `EnsureExeIconResource` and `SpawnPreIconDeleter` in
+  `src/skate3_win_icon.cpp`.
+- **Problem:** #18 removes the self-patching exe icon that makes Defender flag
+  the Windows zip as a trojan, but it isn't merged. So `main` still patches
+  every fresh `skate3.exe` on first run, parks the old exe in `%TEMP%`, and
+  starts a hidden `powershell.exe -WindowStyle Hidden` deleter. Any release cut
+  from `main` keeps the trigger.
+- **Also:**
+  - #18 removes the `%TEMP%\skate3-pre-icon-*.old` sweep and has no
+    `.icon-new` cleanup. Once it merges, the hidden 100 MB parked exes and
+    crash leftovers already on v2.1.0 users' machines are never removed.
+  - #41 (KI-29) hardens the same self-patch code, so it conflicts with #18.
+- **Next step:** decide on #18 and merge it before the next release. Keep a
+  one-time, delete-only sweep of the old leftovers in it: either rebase #41
+  down to just its `CleanupStaleIconTemp`, or close #41.
+
+### KI-73: Exe path lookup truncates on long install paths
+
+- **Status:** open · **Severity:** low
+- **Area:** Windows, exe icon
+- **Tracking:** none yet. Found while fixing KI-29 (#41).
+- **Where:** `EnsureExeIconResource` and the icon thread in
+  `src/skate3_win_icon.cpp`.
+- **Problem:** they call `GetModuleFileNameW` with a `MAX_PATH` buffer. For an
+  install path over 260 characters it truncates but still returns non-zero,
+  so the code works on a wrong path. Low risk, since the moves then just
+  fail. Moot if #18 removes this code.
+- **Fix:** use a growing buffer and check for `ERROR_INSUFFICIENT_BUFFER`.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
