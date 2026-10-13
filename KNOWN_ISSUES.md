@@ -713,7 +713,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-23: OnShutdown missed several UnregisterBind calls
 
-- **Status:** fix in review (PR_PLACEHOLDER), tested unattended · was BT-16
+- **Status:** fix in review in rubensteezy/skate3recomp#35, tested unattended · was BT-16
 - **Problem:** `Skate3BaseApp::OnCreateDialogs` registers ten key binds, but
   `OnShutdown` only unregistered six. The screenshot bind (F6, captures
   `this`), the F5 renderer toggle, the Ctrl+Shift+B showcase bind and the End
