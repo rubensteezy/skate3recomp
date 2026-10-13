@@ -625,6 +625,15 @@ void OnPhotoGrabRequest();
 // GrabScreenshot COMPLETED (post-call): every card-build read from here on
 // is CPU-side of already-copied memory, closes the shutter burst.
 void OnPhotoGrabDone();
+// SkaterPresentationPhoto::GeneratePhotoRequest (a team-member / skater
+// portrait was requested; the game renders it once the skater arena has
+// loaded): arms the skater-photo window.
+void OnSkaterPhotoRequest();
+// The request's render+extract step (sub_8278E960), before and after the
+// call; `result` is its return code (1/2 = assets not ready yet, nothing
+// rendered; anything else = the portrait was rendered and CPU-read).
+void OnSkaterPhotoStep();
+void OnSkaterPhotoStepDone(uint32_t result);
 // True while the photo display-card quad is in the live 2D stream during an
 // armed photo flow; the compose auto-trace trigger keys on it.
 bool PhotoCardVisible();
