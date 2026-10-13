@@ -519,8 +519,11 @@ repro steps; the entry says where the problem is and how it would show.
   nothing loaded and the item counts stayed the same, so the documented
   map-switch sequence seems to do nothing. Unattended tests that rely on it
   would silently stay in one area.
-- **Next step:** check whether it needs `--skate3_demo_path_signed_in=true`, or
-  whether the menu layout changed. Then fix the sequence or its help text.
+- **Likely cause (from KI-28, #40):** in the current build, LB, LT and RT don't
+  change pause-menu tabs; d-pad left/right does. The help text's map-switch
+  example uses `rt` for tabs.
+- **Next step:** update the example to use d-pad left/right, check that it
+  reaches a map change (signed in, if that's needed), and fix the help text.
 
 ### KI-53: Render targets used before their first clear (D3D12 debug layer)
 
@@ -769,6 +772,47 @@ repro steps; the entry says where the problem is and how it would show.
     draw-path retry is (`g_rr_decode_fail`).
 - **Fix:** count successes separately (or rename the log field), and fix the
   comment.
+
+### KI-69: Staged restart-required choices can linger in the Options menu
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu
+- **Tracking:** none yet. Found while fixing KI-28 (#40).
+- **Where:** `Row::pending` in `src/skate3_options_menu.cpp`, cleared only by
+  the restart prompt's buttons (`ApplyPendingAndRestart` / `DiscardPending`).
+- **Problem:** leaving a page without Back leaves the staged choices in place.
+  That happens when the pause menu is closed from a page, on a popup flush, or
+  when `ShowRestartPrompt` fails because the manager pointer is null and falls
+  through to the game's Back. The next visit shows them again, and Back
+  prompts again.
+- **Next step:** decide whether leaving the Options state should discard them;
+  that means hooking the Options state's exit, which isn't identified yet. A
+  small debug cvar that triggers a popup flush (`sub_825D8AF0` →
+  `sub_82D0A738`) would let the flush path be tested unattended.
+
+### KI-70: Restart prompt's Discard doesn't check it's acting on the Options state
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu
+- **Tracking:** none yet. Found while fixing KI-28 (#40). Code reading only.
+- **Where:** the Discard branch of the `sub_8260EA48` hook in
+  `src/skate3_options_menu.cpp`.
+- **Problem:** it uses `OptionsState()` (`owner+180`) without checking that the
+  object is a FrontEndState_Options. If the Options state is gone when Discard
+  fires, `PageOf` reads +68 of whatever object is there and could call
+  `sub_8260D078` on it. Unlikely, because the popup is modal over Options.
+- **Fix:** check the state's vtable against 0x823034B0 before acting.
+
+### KI-71: Restart prompt shows no title
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu, cosmetic
+- **Tracking:** none yet. Found while fixing KI-28 (#40).
+- **Where:** `ShowRestartPrompt` in `src/skate3_options_menu.cpp`.
+- **Problem:** it writes the "Restart Required" title ID, but the in-game
+  popup shows only the message and the buttons.
+- **Next step:** check whether the popup layout uses the +0 field at all, or
+  needs another flag to show a title.
 
 ## Resolved
 
