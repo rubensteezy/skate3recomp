@@ -799,8 +799,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-25: Vehicle retention frustum test ignores the ultrawide scale
 
-- **Status:** fix in review, tested unattended · **Severity:** low · was BT-18
-- **Tracking:** branch `fix/ki25-vehicle-retention-wide`
+- **Status:** fix in review in rubensteezy/skate3recomp#37, tested
+  unattended · **Severity:** low · was BT-18
 - **Where:** `BuildFrameScene` and `CornersOutsideFrustum` in
   `src/skate3_native_scene.cpp`
 - **Problem:** on ultrawide outputs (`skate3_ultrawide = true`) the game's
