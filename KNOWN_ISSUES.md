@@ -173,13 +173,6 @@ repro steps; the entry says where the problem is and how it would show.
   static retention test, so on ultrawide outputs vehicles at the screen edges
   can drop out of retention too early.
 
-### KI-26: ProcessPrewarmEntry does an unguarded read on a worker
-
-- **Status:** open · **Severity:** low · was BT-19
-- **Where:** `src/skate3_native_scene_gpu.cpp`
-- **Problem:** it does a guarded copy into `record` that is never used, then a
-  raw `REX_LOAD` on the worker thread.
-
 ### KI-27: DecodeMesh input validation
 
 - **Status:** open · **Severity:** low · was BT-20
@@ -898,6 +891,33 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-26: ProcessPrewarmEntry did an unguarded read on a worker
+
+- **Status:** fix in review, tested unattended · was BT-19
+- **Tracking:** rubensteezy/skate3recomp#38
+- **Problem:** `ProcessPrewarmEntry` (`src/skate3_native_scene_gpu.cpp`) made
+  a guarded copy of the mesh record into `record` and never used it. It then
+  read the island count (+0x38) and island-params pointer (+0x44) with raw
+  `REX_LOAD_U32` on the prewarm decode worker. `BuildItemFromMesh`
+  (`src/skate3_native_scene.cpp`), which the worker calls next, also read the
+  mesh's bbox, material, vertex descriptor and buffer pointers with raw loads.
+- **Cause:** registration hands the workers mesh addresses that can go stale
+  (map change, streaming decommit) before a worker gets to them. On Windows a
+  raw load of an unmapped page there is an access violation that kills the
+  process. On POSIX the worker's read-fault recovery hides it but reads junk.
+  The guarded copy only covered the record at the moment it was taken.
+- **Fix:** the worker reads +0x38 and +0x44 from the guarded `record`
+  snapshot. `BuildItemFromMesh` now takes one guarded copy of the mesh header
+  (+0x00..+0x37) and reads every field from it, so both the prewarm and the
+  capture callers fail cleanly instead of faulting. An unreadable record
+  skips the entry through the existing frame-paced retry/drop path, is
+  counted in `g_prewarm_unreadable`, and logs
+  `prewarm skipped unreadable mesh record` (first 16 only).
+- **Tested:** unattended demo-path boots on D3D12 and Vulkan. The
+  `gameplay (prewarm: N meshes ...)` counts match a same-machine baseline
+  build without the fix (D3D12 3068 vs 3070, Vulkan 3056 vs 3056, 0 dropped,
+  no unreadable records), with no new errors. Not yet played in-game.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
