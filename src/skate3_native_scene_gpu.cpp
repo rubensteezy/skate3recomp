@@ -7819,7 +7819,7 @@ static void TickShowcase(uint32_t output_width, bool hdr_on) {
 // rendered geometry: its NEAREST corner view-depth is farther than the
 // FARTHEST scene depth (tile MAX) in every occlusion-grid tile it covers.
 // The corners are projected with the view_proj the grid's depth was
-// rendered with (1-2 frames old; see the reduce in ApplySsaoPass), keeping
+// rendered with (1-2 frames old; see RecordOcclusionGrid), keeping
 // bounds and depth consistent under camera motion. Anything not provable -
 // invalid grid, a near-plane crosser, bounds leaving that frame's frustum -
 // classifies as visible; the consumers (telemetry and the occlusion cull)
@@ -7889,6 +7889,64 @@ bool ItemOccludedByGrid(const DrawItem& it, float depth_margin) {
 std::mutex g_occl_pub_mutex;
 std::vector<uint32_t> g_occl_pub_ctxs;
 std::atomic<int64_t> g_occl_pub_ms{0};
+
+// Occlusion-cull state log (KI-21: the cull used to stand down silently
+// with SSAO off). One line whenever the cull settles into the other state
+// (active <-> inactive), with the reason. Settled = held for
+// kOcclStateSettleFrames rendered frames, so one- or two-frame dips at
+// camera cuts (the camera gate) stay quiet; lines are at least
+// kOcclStateLogGapMs apart, and a switch inside that gap is logged late,
+// with the then-current state, so the log always ends on the real state.
+// Render thread only.
+constexpr uint32_t kOcclStateSettleFrames = 30;
+constexpr int64_t kOcclStateLogGapMs = 5000;
+struct OcclCullStateLog {
+  int stable = -1;  // settled state: -1 unknown, 0 inactive, 1 active
+  int logged = -1;  // state of the last line
+  const char* reason = "";
+  uint32_t hold = 0;      // frames the live state has differed from `stable`
+  uint32_t switches = 0;  // settled switches since the last line
+  int64_t last_log_ms = 0;
+};
+OcclCullStateLog g_occl_state_log;
+
+void NoteOcclCullState(bool active, const char* reason) {
+  OcclCullStateLog& st = g_occl_state_log;
+  const int cur = active ? 1 : 0;
+  if (cur == st.stable) {
+    st.hold = 0;
+    st.reason = reason;
+  } else if (++st.hold >= kOcclStateSettleFrames) {
+    st.stable = cur;
+    st.reason = reason;
+    st.hold = 0;
+    if (st.logged >= 0) {
+      ++st.switches;
+    }
+  }
+  if (st.stable < 0 || st.stable == st.logged) {
+    return;
+  }
+  const int64_t now_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  if (st.logged >= 0 && now_ms - st.last_log_ms < kOcclStateLogGapMs) {
+    return;
+  }
+  if (st.switches > 1) {
+    REXLOG_INFO(
+        "native-scene: occlusion cull {} ({}; {} switches since the last "
+        "line)",
+        st.stable ? "active" : "inactive", st.reason, st.switches);
+  } else {
+    REXLOG_INFO("native-scene: occlusion cull {} ({})",
+                st.stable ? "active" : "inactive", st.reason);
+  }
+  st.logged = st.stable;
+  st.switches = 0;
+  st.last_log_ms = now_ms;
+}
 
 }  // namespace
 
@@ -10240,11 +10298,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       g_pw_di_submit.Add(ns(di_t3, di_t4));
     }
   };
-  // Profiling-mode consumption of the occlusion-grid readback ring (filled
-  // by the perf-items reduce in ApplySsaoPass on previous frames): newest
-  // completed slot wins, every completed slot retires. A grid that stops
-  // refreshing (AO off, loading flows) goes invalid instead of classifying
-  // against ancient depth.
+  // Consumption of the occlusion-grid readback ring (filled on previous
+  // frames by ApplySsaoPass, or by ApplyOcclusionGridPass with SSAO off):
+  // newest completed slot wins, every completed slot retires. A grid that
+  // stops refreshing (loading flows, no scene depth) goes invalid instead
+  // of classifying against ancient depth.
   const bool occl_cull_wanted =
       REXCVAR_GET(skate3_native_render_scene_occlusion_cull);
   if ((prof_items || occl_cull_wanted) && !g_r.occl_failed &&
@@ -10274,6 +10332,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                   sizeof(g_r.occl_grid_vp));
       std::memcpy(g_r.occl_grid_cam, g_r.occl_cam[newest],
                   sizeof(g_r.occl_grid_cam));
+      g_r.occl_grid_src_ssao = g_r.occl_src_ssao[newest];
       g_r.occl_grid_frame = frame_number;
       g_r.occl_grid_valid = true;
       for (int i = 0; i < 2; ++i) {
@@ -10379,6 +10438,25 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cam_d2 += d * d;
     }
     occl_cull_active = cam_d2 < 1.0f;
+  }
+  {
+    const char* occl_reason;
+    if (occl_cull_active) {
+      occl_reason = g_r.occl_grid_src_ssao
+                        ? "grid from the SSAO pass"
+                        : "grid from the standalone depth pass, SSAO off";
+    } else if (!occl_cull_wanted) {
+      occl_reason = "skate3_native_render_scene_occlusion_cull=false";
+    } else if (debug_mode != 0) {
+      occl_reason = "debug view";
+    } else if (g_r.occl_failed) {
+      occl_reason = "occlusion-grid resources failed";
+    } else if (!g_r.occl_grid_valid) {
+      occl_reason = "no occlusion grid in the last 240 frames";
+    } else {
+      occl_reason = "camera moved over 1 m since the grid's frame";
+    }
+    NoteOcclCullState(occl_cull_active, occl_reason);
   }
   std::vector<uint32_t> culled_ctxs;
   if (occl_cull_active) {
@@ -11133,16 +11211,28 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     post_ran = true;
     ssao_ran = true;
   }
+  // Occlusion grid without SSAO (KI-21): the GTAO chain builds the grid
+  // when it runs; otherwise this standalone depth pass does, so the
+  // occlusion cull never depends on the AO setting. Exactly one grid build
+  // per frame either way. It leaves this frame's linear depth in
+  // ao_lin_depth, which SSR and the volumetrics then reuse like the AO
+  // plane.
+  bool lin_depth_ran = ssao_ran;
+  if (!ssao_ran && use_depth && !loading_native &&
+      ApplyOcclusionGridPass(context, cmd, scene, viewport, scissor)) {
+    post_ran = true;
+    lin_depth_ran = true;
+  }
 
   // ---- Screen-space reflections (ssr.hlsl) ----
   // March + composite onto the pre-tonemap HDR plane, between the AO pass
   // and the HDR post, so reflections tonemap and bloom exactly like
   // directly-visible scenery. The reflection G-buffer was drawn inside the
-  // scene pass (ssr_gbuf_ready); the SSAO linear-depth plane is reused when
-  // AO ran this frame.
+  // scene pass (ssr_gbuf_ready); the shared linear-depth plane is reused
+  // when the AO or occlusion-grid pass linearized this frame.
   cmd->ProfileRegion(nrhi::ProfileStage::kSsr);
   if (g_r.ssr_gbuf_ready &&
-      ApplySsrPass(context, cmd, scene, viewport, scissor, ssao_ran)) {
+      ApplySsrPass(context, cmd, scene, viewport, scissor, lin_depth_ran)) {
     post_ran = true;
   }
 
@@ -11153,7 +11243,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // so they bloom and tonemap like scene light.
   cmd->ProfileRegion(nrhi::ProfileStage::kVolumetrics);
   if (hdr_on && use_depth && !loading_native &&
-      ApplyVolumetricPass(context, cmd, scene, viewport, scissor, ssao_ran,
+      ApplyVolumetricPass(context, cmd, scene, viewport, scissor, lin_depth_ran,
                           frame_number)) {
     post_ran = true;
   }

@@ -135,14 +135,6 @@ repro steps; the entry says where the problem is and how it would show.
   while the photo editor is closed).
 - **Fix idea:** a generation counter bumped on every depth rebuild.
 
-### KI-21: Occlusion culling silently inactive with SSAO off
-
-- **Status:** open · **Severity:** low–medium · was BT-14
-- **Area:** native renderer, performance
-- **Problem:** the occlusion grid is only produced inside `ApplySsaoPass`.
-  With SSAO off, the grid expires after 240 frames and the occlusion cull
-  stays off without any message.
-
 ### KI-22: Shadow-dump readback buffers not resized (debug only)
 
 - **Status:** open · **Severity:** low–medium · was BT-15
@@ -650,6 +642,51 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-21: Occlusion culling silently inactive with SSAO off
+
+- **Status:** fix in review, awaiting in-game test · **Severity:** low–medium
+  · was BT-14
+- **Area:** native renderer, performance. The emulated renderer (F5) has no
+  occlusion cull, so it is not affected.
+- **Problem:** with Ambient Occlusion off, the occlusion cull never ran and
+  nothing said so. Unattended boots into free roam (1600x900, MSAA 8x),
+  read from the `native-scene: frame` perf line:
+
+  | Build, backend | SSAO | items | draws | culled/frame | guest skips/frame | render thread |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | before, D3D12 | on | 678 | 1095 | 137 | 540 | 0.9 ms |
+  | before, D3D12 | off | 1048 | 1922 | 0 | 0 | 1.4 ms |
+  | before, Vulkan | on | 675 | 1080 | 139 | 539 | 0.9 ms |
+  | before, Vulkan | off | 1056 | 1931 | 0 | 0 | 1.4 ms |
+  | after, D3D12 | on | 674 | 1088 | 137 | 539 | 0.9 ms |
+  | after, D3D12 | off | 681 | 1106 | 139 | 539 | 1.0 ms |
+  | after, Vulkan | on | 670 | 1072 | 139 | 541 | 0.9 ms |
+  | after, Vulkan | off | 666 | 1087 | 138 | 540 | 1.0 ms |
+
+- **Cause:** the cull reads a small depth grid (a tile-MAX reduce of the
+  linearized scene depth, read back 1-2 frames late). Only `ApplySsaoPass`
+  (`src/skate3_native_scene_post.cpp`) built it, from the GTAO chain's
+  linear-depth plane. With SSAO off no grid was ever built, the grid went
+  invalid after 240 frames, and `RenderScene` kept the cull, the build-side
+  skip and the guest dispatch filter off without a log line.
+- **Fix:** the grid build is factored out of `ApplySsaoPass` into
+  `RecordOcclusionGrid`, with shared helpers for the binding layout, the
+  linear-depth plane, the depth view and the linearize draw. When the GTAO
+  chain does not run, the new `ApplyOcclusionGridPass` does only the
+  full-res linearize (its own `ps_linearize` PSO) and the grid reduce. It
+  runs only on frames where `ApplySsaoPass` did not, so there is one grid
+  build per frame either way. SSR and the volumetrics reuse the linear depth
+  it leaves, as they already did after the SSAO pass. No shader changes.
+  `RenderScene` now logs `native-scene: occlusion cull active (<grid
+  source>)` or `... inactive (<reason>)` when the cull's state holds for 30
+  frames, at most one line per 5 s.
+- **Tested:** unattended `--skate3_demo_path=true` boots on D3D12 and
+  Vulkan, SSAO on and off, MSAA 8x and 1x. Screenshots of a D3D12 run with
+  SSAO off while the skater pushes showed nothing missing. Vulkan frames
+  could not be captured by the test script.
+- **Not tested:** free roam by hand, toggling SSAO live, and loading or
+  map-switch transitions.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
