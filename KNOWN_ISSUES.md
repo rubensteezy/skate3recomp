@@ -412,7 +412,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-17: Texture routing maps grew without bound
 
-- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM · **Severity:** low–medium · was BT-10
+- **Status:** fix in review in rubensteezy/skate3recomp#29 · **Severity:** low–medium · was BT-10
 - **Area:** native renderer, texture cache
 - **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
   `tex_pending_first` were only cleared by the debug cache flush, so they grew
