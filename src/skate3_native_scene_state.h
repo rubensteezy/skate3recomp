@@ -1078,6 +1078,21 @@ inline std::atomic<int64_t> g_photo_grab_request_ns{-1};
 // aux-target grab some flows issue on the following frame).
 inline std::atomic<int64_t> g_photo_grab_done_ns{-1};
 
+// SkaterPresentationPhoto (the team-member / skater portrait generator):
+// last GeneratePhotoRequest, last entry into the request's render+extract
+// step, and the last time that step finished (PerfClock ns, -1 = never).
+// The step renders the skater into the postfx manager's 1152x640 screenshot
+// target (0x04911000, the photo grab's surface) and CPU-reads the resolve
+// (PhotoEffects::GeneratePhoto); the saved portrait is whatever guest memory
+// holds there. Guest thread writes, render thread reads
+// (UpdateSkaterPhotoWindow).
+inline std::atomic<int64_t> g_skater_photo_request_ns{-1};
+inline std::atomic<int64_t> g_skater_photo_step_ns{-1};
+inline std::atomic<int64_t> g_skater_photo_done_ns{-1};
+// The skater-photo window's SDK overrides are applied this frame (render
+// thread writes; the guest-side hooks read it for the timing log).
+inline std::atomic<bool> g_skater_photo_window_armed{false};
+
 // Last PhotoReplayController::Update heartbeat, nanoseconds on PerfClock
 // (steady). -1 until the first heartbeat. Written from the guest thread,
 // read by RenderScene on the render thread.

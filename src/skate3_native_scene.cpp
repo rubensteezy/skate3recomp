@@ -3045,6 +3045,48 @@ void OnPhotoGrabDone() {
       std::memory_order_relaxed);
 }
 
+
+void OnSkaterPhotoRequest() {
+  g_skater_photo_request_ns.store(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          PerfClock::now().time_since_epoch())
+          .count(),
+      std::memory_order_relaxed);
+}
+
+
+void OnSkaterPhotoStep() {
+  g_skater_photo_step_ns.store(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          PerfClock::now().time_since_epoch())
+          .count(),
+      std::memory_order_relaxed);
+}
+
+
+void OnSkaterPhotoStepDone(uint32_t result) {
+  if (result == 1 || result == 2) {
+    return;  // arena not ready: nothing rendered, the job retries
+  }
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             PerfClock::now().time_since_epoch())
+                             .count();
+  g_skater_photo_done_ns.store(now_ns, std::memory_order_relaxed);
+  // A portrait was rendered and CPU-read. Whether the window was armed by
+  // then is the whole fix (the request must lead the render by a frame).
+  static std::atomic<uint32_t> s_logs{0};
+  if (s_logs.fetch_add(1, std::memory_order_relaxed) < 32) {
+    const int64_t req_ns = g_skater_photo_request_ns.load(std::memory_order_relaxed);
+    REXLOG_INFO(
+        "native-scene: skater photo generated (result {}, {} ms after the "
+        "request, window {})",
+        result, req_ns >= 0 ? (now_ns - req_ns) / 1'000'000 : -1,
+        g_skater_photo_window_armed.load(std::memory_order_relaxed)
+            ? "armed"
+            : "NOT armed - portrait may hold stale screenshot memory");
+  }
+}
+
 // True while the photo display-card quad is in the live 2D stream during an
 // armed photo flow; the compose auto-trace trigger
 // (skate3_native_render.cpp) keys on it.
