@@ -1205,8 +1205,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-46: Long user-data paths silently drop a VFS overlay alias
 
-- **Status:** fix in review, tested unattended (PR pending). Found while
-  fixing KI-19 (#31).
+- **Status:** fix in review in rubensteezy/skate3recomp#46, tested
+  unattended. Found while fixing KI-19 (#31).
 - **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
   / `CreateOverlayDirectory`.
 - **Problem:** with a long user-data path, the overlay folder
