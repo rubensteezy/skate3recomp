@@ -694,6 +694,34 @@ extern "C" REX_FUNC(sub_824FD4B0) {
   __imp__sub_824FD4B0(ctx, base);
 }
 
+// SkaterPresentationPhoto::GeneratePhotoRequest: queues a skater portrait
+// (team-member boxes; the career "new team member" prompt and every
+// accepted Create Skater edit). The portrait is rendered later, once the
+// skater's arena has loaded, by the step below; the request is the
+// predictive signal that arms the skater-photo window.
+extern "C" REX_FUNC(sub_8278EE78) {
+  if (skate3::native_render::Enabled()) {
+    skate3::native_scene::OnSkaterPhotoRequest();
+  }
+  __imp__sub_8278EE78(ctx, base);
+}
+
+// The request's render+extract step (called from the
+// "PresSkaterPhotoRequest [%d]" job): renders the skater into the postfx
+// manager's 1152x640 screenshot target, then PhotoEffects::GeneratePhoto
+// CPU-reads that resolve (0x04911000) into the 128x256 portrait the save
+// keeps. Returns 1/2 while the arena is not ready.
+extern "C" REX_FUNC(sub_8278E960) {
+  const bool enabled = skate3::native_render::Enabled();
+  if (enabled) {
+    skate3::native_scene::OnSkaterPhotoStep();
+  }
+  __imp__sub_8278E960(ctx, base);
+  if (enabled) {
+    skate3::native_scene::OnSkaterPhotoStepDone(ctx.r3.u32);
+  }
+}
+
 namespace skate3::native_scene {
 // Fault-guarded guest read (defined in skate3_native_scene.cpp).
 bool GuestTryLoadU32(uint8_t* base, uint32_t addr, uint32_t* out);

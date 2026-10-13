@@ -5347,6 +5347,7 @@ enum YieldOverrideOwner : uint32_t {
   kOvrPhotoEmulated = 1u << 3,  // UpdatePhotoGrabWindow: emulated fallback
   kOvrPhotoBurst = 1u << 4,    // UpdatePhotoGrabWindow: shutter burst
   kOvrPhotoDisplay = 1u << 5,  // YieldForPhotoDisplay: pre-roll + yield
+  kOvrSkaterPhoto = 1u << 6,   // UpdateSkaterPhotoWindow: portrait render
 };
 
 template <typename T>
@@ -5436,6 +5437,7 @@ void RestoreAllYieldOverrides() {
   any |= g_ovr_async_shaders.ReleaseAll();
   any |= g_ovr_readback_len.ReleaseAll();
   any |= g_ovr_readback_halfpx.ReleaseAll();
+  g_skater_photo_window_armed.store(false, std::memory_order_relaxed);
   if (any) {
     REXLOG_INFO(
         "native-scene: native scene inactive - SDK cvar overrides (suppression, "
@@ -6135,6 +6137,64 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
   // Level-triggered re-sync: re-acquires whatever RestoreAllYieldOverrides
   // dropped while the native scene was off.
   sync_overrides();
+}
+
+// Skater-photo window (KI-35, team-member portraits saved as old event
+// photos): SkaterPresentationPhoto renders the skater into the postfx
+// manager's 1152x640 screenshot target and PhotoEffects::GeneratePhoto
+// CPU-reads that resolve from guest memory (0x04911000, the photo grab's
+// surface) into the 128x256 portrait the save keeps. Under the native
+// renderer the resolve only reached CPU memory when the menu portrait
+// window happened to be open: suppress mode 3 so the portrait passes
+// execute, and the SDK's targeted 0x04911000 copy, which skips gameplay
+// contexts. The career "new team member" prompt falls outside both, the
+// passes were suppressed / the copy skipped, and the portrait was cut from
+// whatever the last photo grab left there: the previous event photo, baked
+// into the save (so the emulated renderer showed it too).
+// Keyed on the game's own request instead of screen heuristics: from
+// GeneratePhotoRequest until the render+extract step reports done, hold
+// suppress mode 3 (the pause-menu edit path proves it executes these
+// passes), synchronous shaders (one-shot render) and the forced
+// <= 0x2D0000 CPU readback, which works in any presence context. The
+// native photo grab stops writing the same surface meanwhile (see
+// RenderScene). Render thread only.
+void UpdateSkaterPhotoWindow() {
+  // A request normally renders within a frame or two of its arena load;
+  // the cap only bounds a request that never renders.
+  constexpr int64_t kRequestCapNs = 5'000'000'000;
+  // Steps finishing back to back (several queued portraits) keep the
+  // window open; so does a step still polling for its arena.
+  constexpr int64_t kGraceNs = 500'000'000;
+  static bool s_armed = false;
+  static int64_t s_open_ns = 0;
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             PerfClock::now().time_since_epoch())
+                             .count();
+  const int64_t req = g_skater_photo_request_ns.load(std::memory_order_relaxed);
+  const int64_t step = g_skater_photo_step_ns.load(std::memory_order_relaxed);
+  const int64_t done = g_skater_photo_done_ns.load(std::memory_order_relaxed);
+  const bool pending = req >= 0 && now_ns - req < kRequestCapNs &&
+                       (done < req || now_ns - done < kGraceNs);
+  const bool stepping = step >= 0 && now_ns - step < kGraceNs;
+  const bool want = pending || stepping;
+  g_ovr_suppress_mode.Hold(kOvrSkaterPhoto, want);
+  g_ovr_async_shaders.Hold(kOvrSkaterPhoto, want);
+  g_ovr_readback_len.Hold(kOvrSkaterPhoto, want);
+  g_skater_photo_window_armed.store(want, std::memory_order_relaxed);
+  if (want != s_armed) {
+    s_armed = want;
+    if (want) {
+      s_open_ns = now_ns;
+      REXLOG_INFO(
+          "native-scene: skater photo window OPEN (suppress mode 3, sync "
+          "shaders, <=0x{:X} resolves read back; the portrait resolve must "
+          "reach guest memory)",
+          REXCVAR_GET(native_render_force_resolve_readback_max_length));
+    } else {
+      REXLOG_INFO("native-scene: skater photo window closed after {} ms",
+                  (now_ns - s_open_ns) / 1'000'000);
+    }
+  }
 }
 
 // Photo display-card screen: yield to the emulated output while the framed
@@ -7886,6 +7946,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     ArmGuestReadRecoveryForThread(base);
     UpdatePhotoGrabWindow(base);
   }
+  UpdateSkaterPhotoWindow();
   if (YieldForMenus(context)) {
     return false;
   }
@@ -11681,7 +11742,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           newest = i;
         }
       }
-      if (newest >= 0) {
+      // The skater-photo window owns the screenshot target: its portrait
+      // resolve is CPU-read from the same surface, and a native frame
+      // landing on top of it would become the saved portrait. Completed
+      // buffers wait (unwritten) until the window closes.
+      if (newest >= 0 &&
+          !g_skater_photo_window_armed.load(std::memory_order_relaxed)) {
         static bool s_grab_write_warned = false;
         const auto tile_t0 = PerfClock::now();
         // Make the GPU's completed copy visible to the CPU read below (no-op
