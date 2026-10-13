@@ -5,14 +5,17 @@
 #if defined(_WIN32)
 
 #include <windows.h>
+#include <tlhelp32.h>
 // initguid must precede wincodec so the WIC CLSIDs/IIDs are defined in this
 // translation unit (no dependency on uuid.lib link order).
 #include <initguid.h>
 #include <wincodec.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -141,6 +144,187 @@ struct GrpIconDir {
 };
 #pragma pack(pop)
 
+// --- .icon-new temp-file hygiene (KI-29) -----------------------------------
+
+// Win32 error code -> "<code> (<system message>)" for the log.
+std::string Win32ErrorText(DWORD err) {
+  char* msg = nullptr;
+  const DWORD n = FormatMessageA(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+          FORMAT_MESSAGE_IGNORE_INSERTS,
+      nullptr, err, 0, reinterpret_cast<char*>(&msg), 0, nullptr);
+  std::string text = std::to_string(err);
+  if (n != 0 && msg != nullptr) {
+    std::string m(msg, n);
+    while (!m.empty() && (m.back() == '\r' || m.back() == '\n' ||
+                          m.back() == ' ' || m.back() == '.')) {
+      m.pop_back();
+    }
+    text += " (" + m + ")";
+  }
+  if (msg != nullptr) {
+    LocalFree(msg);
+  }
+  return text;
+}
+
+// Delete a temp file this updater wrote. CopyFileW copies the source's
+// attributes, so a read-only skate3.exe yields a read-only .icon-new that a
+// plain DeleteFileW refuses; clear that first. A short retry rides out a
+// scanner briefly holding the freshly written file. Returns true when the
+// file is gone (or never existed); otherwise logs why it stays.
+bool RemoveTempFile(const std::filesystem::path& path) {
+  constexpr int kAttempts = 10;
+  for (int attempt = 1;; ++attempt) {
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+      const DWORD err = GetLastError();
+      if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        return true;
+      }
+    } else if (attrs & FILE_ATTRIBUTE_READONLY) {
+      SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+    }
+    if (DeleteFileW(path.c_str())) {
+      return true;
+    }
+    const DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+      return true;
+    }
+    if (attempt == kAttempts) {
+      REXLOG_WARN("win-icon: could not remove {} ({}); the next launch retries",
+                  path.string(), Win32ErrorText(err));
+      return false;
+    }
+    Sleep(100);
+  }
+}
+
+// True when another live process runs this same exe file. Conservative: a
+// same-named process whose image path can't be read counts as running.
+bool OtherInstanceRunningFrom(const std::filesystem::path& exe) {
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) {
+    return true;
+  }
+  const DWORD self = GetCurrentProcessId();
+  const std::wstring exe_name = exe.filename().wstring();
+  bool found = false;
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  for (BOOL more = Process32FirstW(snap, &pe); more && !found;
+       more = Process32NextW(snap, &pe)) {
+    if (pe.th32ProcessID == self ||
+        CompareStringOrdinal(pe.szExeFile, -1, exe_name.c_str(), -1, TRUE) !=
+            CSTR_EQUAL) {
+      continue;
+    }
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                              pe.th32ProcessID);
+    if (proc == nullptr) {
+      found = true;
+      break;
+    }
+    std::vector<wchar_t> image(32768);
+    DWORD len = DWORD(image.size());
+    found = !QueryFullProcessImageNameW(proc, 0, image.data(), &len) ||
+            CompareStringOrdinal(image.data(), int(len), exe.c_str(), -1,
+                                 TRUE) == CSTR_EQUAL;
+    CloseHandle(proc);
+  }
+  CloseHandle(snap);
+  return found;
+}
+
+// True when `path` exists and was last touched before `started` (a FILETIME
+// tick count). `pe_only` additionally requires an "MZ" image header.
+bool IsStaleTempFile(const std::filesystem::path& path, int64_t started,
+                     bool pe_only) {
+  HANDLE file = CreateFileW(
+      path.c_str(), FILE_READ_ATTRIBUTES | (pe_only ? GENERIC_READ : 0),
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, 0, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  FILE_BASIC_INFO info{};
+  bool stale = GetFileInformationByHandleEx(file, FileBasicInfo, &info,
+                                            sizeof(info)) != 0;
+  if (stale) {
+    // CopyFileW carries the source's last-write and change times over, so a
+    // fresh copy shows its age only in the creation time (all three move
+    // once the resource update rewrites it), and NTFS name tunneling can
+    // backdate even that for a file re-created within 15 s of a delete.
+    // Judge by the newest stamp; the instance check is the guard that
+    // matters.
+    const int64_t touched =
+        (std::max)({info.CreationTime.QuadPart, info.LastWriteTime.QuadPart,
+                    info.ChangeTime.QuadPart});
+    stale = touched < started;
+  }
+  if (stale && pe_only) {
+    char magic[2] = {};
+    DWORD got = 0;
+    stale = ReadFile(file, magic, sizeof(magic), &got, nullptr) &&
+            got == sizeof(magic) && magic[0] == 'M' && magic[1] == 'Z';
+  }
+  CloseHandle(file);
+  return stale;
+}
+
+// Startup backstop for temp files a crashed or killed run (or a blocked
+// cleanup) can leave next to the exe:
+//  - <exe>.icon-new, the patched copy;
+//  - RCX*.tmp, the scratch image EndUpdateResourceW writes in the target's
+//    folder while it commits (a ~100 MB partial exe if killed mid-commit).
+// Each is removed only when provably stale (last touched before this process
+// started) and no other instance of this exe is running (one that could be
+// patching right now).
+void CleanupStaleIconTemp(const std::filesystem::path& exe) {
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel,
+                       &user)) {
+    return;
+  }
+  const int64_t started =
+      int64_t((uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime);
+  std::vector<std::filesystem::path> stale;
+  const std::filesystem::path temp = exe.wstring() + L".icon-new";
+  if (IsStaleTempFile(temp, started, false)) {
+    stale.push_back(temp);
+  }
+  const std::filesystem::path dir = exe.parent_path();
+  WIN32_FIND_DATAW fd;
+  HANDLE find = FindFirstFileW((dir / L"RCX*.tmp").c_str(), &fd);
+  if (find != INVALID_HANDLE_VALUE) {
+    do {
+      const std::filesystem::path rcx = dir / fd.cFileName;
+      if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+          IsStaleTempFile(rcx, started, true)) {
+        stale.push_back(rcx);
+      }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+  }
+  if (stale.empty()) {
+    return;  // nothing left behind (the normal case)
+  }
+  if (OtherInstanceRunningFrom(exe)) {
+    REXLOG_INFO(
+        "win-icon: {} leftover icon-patch temp file(s) kept: another "
+        "instance of {} is running",
+        stale.size(), exe.filename().string());
+    return;
+  }
+  for (const auto& path : stale) {
+    if (RemoveTempFile(path)) {
+      REXLOG_INFO("win-icon: removed stale {} left by an earlier run",
+                  path.filename().string());
+    }
+  }
+}
+
 // The renamed-aside original exe (still the locked running image) cannot be
 // deleted from this process. Hand it to a detached waiter that deletes it
 // the moment this process exits (clean exit or crash), so a freshly
@@ -253,33 +437,55 @@ void EnsureExeIconResource(const std::vector<uint8_t>& png) {
                 sizeof(e));
   }
 
-  // Patch a COPY first so a failure changes nothing.
+  // Two instances patching one exe would trample each other's .icon-new;
+  // leave it to a launch that runs alone.
+  if (OtherInstanceRunningFrom(exe)) {
+    REXLOG_INFO(
+        "win-icon: another instance of {} is running; icon patch deferred",
+        exe.filename().string());
+    return;
+  }
+
+  // Patch a COPY first so a failure changes nothing. Every failure below
+  // removes the copy again (KI-29).
   const std::filesystem::path temp = exe.wstring() + L".icon-new";
   if (!CopyFileW(exe.c_str(), temp.c_str(), FALSE)) {
-    REXLOG_INFO("win-icon: exe copy for icon patch failed ({}); skipping",
-                GetLastError());
+    const DWORD err = GetLastError();
+    RemoveTempFile(temp);  // a failed copy can leave a partial file
+    REXLOG_WARN("win-icon: exe copy for icon patch failed ({}); skipping",
+                Win32ErrorText(err));
     return;
   }
   const WORD lang = MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
   HANDLE update = BeginUpdateResourceW(temp.c_str(), FALSE);
   bool ok = update != nullptr;
+  DWORD patch_err = ok ? DWORD(ERROR_SUCCESS) : GetLastError();
   for (size_t i = 0; ok && i < images.size(); ++i) {
     ok = UpdateResourceW(update, reinterpret_cast<LPCWSTR>(RT_ICON),
                          MAKEINTRESOURCEW(WORD(i + 1)), lang,
                          images[i].data.data(), DWORD(images[i].data.size()));
+    if (!ok) {
+      patch_err = GetLastError();
+    }
   }
   if (ok) {
     ok = UpdateResourceW(update, reinterpret_cast<LPCWSTR>(RT_GROUP_ICON),
                          L"MAINICON", lang, group.data(), DWORD(group.size()));
+    if (!ok) {
+      patch_err = GetLastError();
+    }
   }
   if (update != nullptr) {
     // Commit (discard on failure).
-    ok = EndUpdateResourceW(update, !ok) && ok;
+    if (!EndUpdateResourceW(update, !ok) && ok) {
+      ok = false;
+      patch_err = GetLastError();
+    }
   }
   if (!ok) {
-    REXLOG_INFO("win-icon: icon resource patch failed ({}); skipping",
-                GetLastError());
-    DeleteFileW(temp.c_str());
+    RemoveTempFile(temp);
+    REXLOG_WARN("win-icon: icon resource patch failed ({}); skipping",
+                Win32ErrorText(patch_err));
     return;
   }
   // Swap: rename the (locked but renamable) running exe aside, move the
@@ -296,14 +502,34 @@ void EnsureExeIconResource(const std::vector<uint8_t>& png) {
   if (!MoveFileExW(exe.c_str(), pre.c_str(), MOVEFILE_REPLACE_EXISTING)) {
     pre = pre_local;
     if (!MoveFileExW(exe.c_str(), pre.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-      REXLOG_INFO("win-icon: could not move running exe aside ({}); skipping",
-                  GetLastError());
-      DeleteFileW(temp.c_str());
+      const DWORD err = GetLastError();
+      RemoveTempFile(temp);
+      REXLOG_WARN(
+          "win-icon: could not move running exe aside ({}); icon patch "
+          "skipped",
+          Win32ErrorText(err));
       return;
     }
   }
   if (!MoveFileW(temp.c_str(), exe.c_str())) {
-    MoveFileW(pre.c_str(), exe.c_str());
+    const DWORD err = GetLastError();
+    if (!MoveFileW(pre.c_str(), exe.c_str())) {
+      // Both moves failed, so nothing sits at the exe path now. Keep the
+      // patched copy (a complete, runnable exe) and say where both are.
+      const DWORD restore_err = GetLastError();
+      REXLOG_ERROR(
+          "win-icon: could not move the patched exe into place ({}) nor "
+          "restore the original ({}); {} is missing, rename {} or {} back to "
+          "it",
+          Win32ErrorText(err), Win32ErrorText(restore_err), exe.string(),
+          temp.string(), pre.string());
+      return;
+    }
+    RemoveTempFile(temp);
+    REXLOG_WARN(
+        "win-icon: could not move the patched exe into place ({}); original "
+        "restored, icon patch skipped",
+        Win32ErrorText(err));
     return;
   }
   SetFileAttributesW(pre.c_str(), FILE_ATTRIBUTE_HIDDEN);
@@ -325,6 +551,10 @@ void ApplyGameIconFromGameData(const std::filesystem::path& game_data_root,
   }
   HWND hwnd = static_cast<HWND>(native_window_handle);
   std::thread([nxeart, hwnd] {
+    wchar_t exe_w[MAX_PATH];
+    if (GetModuleFileNameW(nullptr, exe_w, MAX_PATH) != 0) {
+      CleanupStaleIconTemp(std::filesystem::path(exe_w));
+    }
     const std::vector<uint8_t> png = ExtractFirstPng(nxeart);
     if (png.empty()) {
       REXLOG_INFO("win-icon: no title icon found in {}", nxeart.string());
