@@ -522,6 +522,41 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** check whether it needs `--skate3_demo_path_signed_in=true`, or
   whether the menu layout changed. Then fix the sequence or its help text.
 
+### KI-53: Render targets used before their first clear (D3D12 debug layer)
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, shadows and startup
+- **Tracking:** none yet. Found while fixing KI-22 (#34).
+- **Where:** `EnsureShadowResources` / `RenderShadowAtlas` in
+  `src/skate3_native_scene_gpu.cpp`, plus unidentified resources at boot.
+- **Problem:** the D3D12 debug layer reports
+  `RENDER_TARGET_OR_DEPTH_STENCIL_RESOUCE_NOT_INITIALIZED` (#1422) twice after
+  every shadow atlas recreation. That fits `shadow_mid` and `shadow_final`:
+  the blur pass draws into them, but only `shadow_raw` is ever cleared. It's
+  probably harmless, since the blur writes every texel of each tile. The same
+  error also appears 4 times at boot and 17 times when gameplay starts, from
+  resources not yet identified.
+- **Next step:** clear or discard `shadow_mid` and `shadow_final` once after
+  creation. Then run with the debug layer and find the boot-time ones (the
+  KI-22 agent's `dbwin.ps1` captures debug-layer output without a debugger).
+
+### KI-54: Shadow-dump readback buffers are never freed (debug only)
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, diagnostics
+- **Tracking:** none yet. Found while fixing KI-22 (#34).
+- **Where:** `RenderShadowAtlas` in `src/skate3_native_scene_gpu.cpp`.
+- **Problems:**
+  - After one shadow recording, the four readback buffers stay allocated for
+    the rest of the session. At tile 4096 that is about 400 MB each, about
+    1.6 GB in all. The only release is the size-mismatch path #34 added.
+  - Dump file names use a seconds timestamp plus the frame index, so two
+    recordings in the same second overwrite each other.
+  - A recording usually yields 3 dumps, not `kShadowDumpFrames` = 4, because
+    the recording window is shorter than 4 shadow frames.
+- **Next step:** release the buffers once a session's dumps are written, and
+  add a counter to the file name.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
