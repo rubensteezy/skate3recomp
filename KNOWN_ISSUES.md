@@ -371,6 +371,49 @@ repro steps; the entry says where the problem is and how it would show.
 - **Fix:** drop the 2D `textures=` field, or make it count something
   2D-specific.
 
+### KI-43: A script/debug getter reads the scaled cull threshold
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** draw distance
+- **Tracking:** none yet. Found while fixing KI-18 (#30).
+- **Where:** `sub_825B5730` (`generated/skate3_recomp.29.cpp`). It has no
+  direct callers and is reached only through a registered function pointer.
+  It reads the global render context's cull object
+  (`[[0x820CFD94]+292]+6064`) and returns
+  `clamp(int((threshold - c0) * c1), 0, 10)` through `sub_82E86550`.
+- **Problem:** it sees the draw-distance scaled value (0.2 becomes 0.05), so
+  any script or menu that reads this level gets a shifted number. If a
+  matching setter writes a level back through a path
+  `src/skate3_draw_distance.cpp` doesn't hook, the scaled value becomes the
+  new base and the scale compounds.
+- **Next step:** find who registers or calls `sub_825B5730`, and any setter for
+  that level, then watch it during a test.
+
+### KI-44: Live draw-distance changes skip setter-only cull objects
+
+- **Status:** open · **Severity:** low
+- **Area:** draw distance
+- **Tracking:** none yet. Found while fixing KI-18 (#30).
+- **Where:** `src/skate3_draw_distance.cpp`.
+- **Problem:** a hot change of `skate3_draw_distance_scale` reaches only the
+  `view+8` cull objects, which are rescaled every frame. Objects seen only
+  through the setter hook keep the old scale until the next config apply.
+  Low impact: no setter calls showed up in a boot to gameplay.
+- **Next step:** when the cvar value changes, rescale every load-bearing slot
+  from the per-frame hook.
+
+### KI-45: XMA context input offset exceeds its buffer
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** audio (SDK APU)
+- **Tracking:** none yet. Seen in a normal boot log while testing KI-18 (#30).
+- **Symptom:** the log repeats
+  `[apu] XmaContext 31 old: input offset 16416 exceeds buffer size 16384`.
+  Whether any sound is affected is unknown.
+- **Next step:** find the check in the rexglue SDK's XMA decoder and which
+  game sound uses context 31. Compare with upstream rexglue-sdk, then listen
+  for a missing or clipped sound at the moment the line is logged.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
