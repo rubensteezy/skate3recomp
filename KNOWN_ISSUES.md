@@ -618,21 +618,6 @@ repro steps; the entry says where the problem is and how it would show.
   is hex; other all-digit strings are decimal), or have the SDK call one
   shared parser.
 
-### KI-59: A malformed profiles.toml silently wipes all profiles
-
-- **Status:** open · **Severity:** low–medium
-- **Area:** user settings, profiles
-- **Tracking:** none yet. Found while fixing KI-24 (#36).
-- **Where:** `LoadProfiles` in `src/skate3_user_settings.cpp`, and the
-  `save_profile` lambda in `src/skate3_app_common.cpp`.
-- **Problem:** `LoadProfiles` catches `toml::parse_error`, returns an empty
-  store and logs nothing. The next profile save then calls
-  `EnsureUsableProfileStore`, which adds a default "Player" profile, and
-  overwrites the user's file with it. Any malformed `profiles.toml` (a hand
-  edit, invalid UTF-8, see KI-60) destroys every profile on the next save.
-- **Next step:** log the parse error, and back up or refuse to overwrite a file
-  that didn't parse.
-
 ### KI-60: Gamertag truncation can produce invalid UTF-8
 
 - **Status:** open · **Severity:** low
@@ -642,8 +627,8 @@ repro steps; the entry says where the problem is and how it would show.
   `src/ui/overlay/simple_settings_overlay.cpp`.
 - **Problem:** the gamertag is copied into `gamertag_buf_[32]` byte by byte,
   which can cut a multi-byte UTF-8 character in half. `SaveProfile` then
-  writes invalid UTF-8, toml++ rejects the file, and KI-59 wipes the
-  profiles. It needs a gamertag over 31 bytes with a non-ASCII character at
+  writes invalid UTF-8 and toml++ rejects the file. Before the KI-59 fix
+  that wiped the profiles; now the file is backed up and the profiles reset. It needs a gamertag over 31 bytes with a non-ASCII character at
   the cut, so in practice only hand-edited names hit it.
 - **Fix:** truncate at a UTF-8 character boundary.
 
@@ -1156,6 +1141,71 @@ repro steps; the entry says where the problem is and how it would show.
 - **Emulated (F5), not fixed here:** in a gameplay presence context with
   `readback_resolve=none`, the emulated renderer would read the same stale
   memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
+
+### KI-59: A malformed profiles.toml silently wiped all profiles
+
+- **Status:** fix in review in rubensteezy/skate3recomp#45, tested
+  unattended (awaiting an in-game save from the settings dialog) ·
+  **Severity:** low–medium
+- **Area:** user settings, profiles
+- **Tracking:** rubensteezy/skate3recomp#45. Found while fixing KI-24 (#36).
+- **Where:** `LoadProfiles` and `SaveProfiles` in
+  `src/skate3_user_settings.cpp`, the new `src/skate3_safe_file.cpp`, and the
+  `save_profile` lambda and `OnFinalizePaths` in `src/skate3_app_common.cpp`.
+- **Cause:** `LoadProfiles` caught `toml::parse_error`, returned an empty store
+  and logged nothing. toml++'s `parse_file` also throws `parse_error` when it
+  can't open the file, so a locked or unreadable file looked the same. The
+  next profile save then ran `EnsureUsableProfileStore`, which adds a default
+  "Player" profile, and `SaveProfiles` truncated the user's file and wrote
+  that in its place. Any malformed `profiles.toml` (a hand edit, invalid
+  UTF-8 from KI-60, a crash mid-write) lost every profile. The save itself
+  truncated in place, so a crash during it could also leave a partial file.
+- **Fix:**
+  - `LoadProfiles` reads the bytes itself (`safe_file::ReadWholeFile`), so a
+    missing file, an unreadable file and a parse error are told apart.
+  - Parse error: logs the path, line, column and toml++'s description, then
+    moves the file to `profiles.toml.bad-YYYYMMDD-HHMMSS` in the same folder
+    (`MoveFileExW` without replace, or `link`+`unlink` on POSIX, so an
+    existing backup is never clobbered). If the move fails (the file is open
+    without delete sharing), it copies it and checks the copy matches the
+    bytes it read. The newest 5 backups are kept. Only then is the store
+    treated as empty, and a "PROFILES RESET ... backed up as <path>" error is
+    logged. If no verified backup could be made, the store is marked
+    `save_blocked`.
+  - Read error (locked, permission denied): logged, and the store is marked
+    `save_blocked`. The session runs on a temporary default profile and
+    `SaveProfiles` refuses to write until a later load can read the file.
+  - `SaveProfiles` writes `profiles.toml.tmp` in the same folder, flushes it
+    (`FlushFileBuffers` / `fsync`) and replaces the target with
+    `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` /
+    `rename`. On failure the target is untouched, the temp file is removed
+    and the error is logged. Line endings stay CRLF on Windows, so a file the
+    game wrote saves back byte for byte.
+  - Entries without a usable id, gamertag and xuid are still dropped, but now
+    with a warning.
+- **Tests:** a standalone harness (compiles `skate3_safe_file.cpp` and
+  `skate3_user_settings.cpp` with stub `rex/cvar.h` and `rex/logging.h`
+  against the SDK's toml++) passes: a good file round-trips byte-identical;
+  bad TOML and invalid UTF-8 are moved to a backup with the original bytes
+  before the default is saved; backups prune to 5; a file held open with no
+  sharing is not read as empty and not overwritten; a file held open with
+  read sharing only loads, and saves fail cleanly; a malformed file held open
+  with read sharing gets a verified copy backup; a read-only file is not
+  replaced; and a child process killed 8 times while writing 512 MB through
+  `WriteFileAtomic` always left the old file intact. In the relwithdebinfo
+  build with `--user_data_root=<scratch>` and the signed-in demo path: a good
+  two-profile file loaded (the save was created under the selected profile's
+  XUID) and was unchanged after the run. Bad TOML and invalid UTF-8 logged
+  the error with line and column, were backed up byte-identical, and then
+  the startup save wrote the default profile. A file held open with
+  `FileShare.None` logged "cannot read" and was unchanged.
+- **Not tested in the game:** saving from the profile page of the settings
+  dialog, which needs a person at the controls. It calls the same
+  `LoadProfiles` and `SaveProfiles` as the tests.
+- **Not covered:** `settings.toml` is written by the SDK
+  (`WriteConfigFile` in `third_party/rexglue-sdk/src/core/cvar.cpp`), which
+  already writes a temp file and renames it, but doesn't flush it to disk and
+  rewrites a malformed file without a backup.
 
 ### Reviewed and ruled out (code review)
 
