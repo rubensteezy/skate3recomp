@@ -687,6 +687,57 @@ repro steps; the entry says where the problem is and how it would show.
   traffic despawn visibility check in the recompiled code and see which
   frustum it uses.
 
+### KI-64: Raw guest loads in the capture path and render hooks
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-26 (#38).
+- **Where:**
+  - `src/skate3_native_scene.cpp`: `BuildItemFromMeshCached` reads
+    `mesh+0x34` and `mesh+0x30` raw on every frame's cache-hit check, and
+    `BuildItemGeometry` reads `ctx` and then `record` raw.
+  - `src/skate3_native_render.cpp`: `REX_LOAD_U32(sort_vec)`,
+    `REX_LOAD_U32(entry + 4)`, `self + 3240` and `REX_LOAD_U8(self + 3397/3396)`
+    in the hooks.
+- **Problem:** if streaming unmaps a mesh between being recorded and the frame
+  build, the guest render thread faults and the game crashes.
+  `GuestReadRecoveryScope` is a no-op on Windows, so nothing catches it. The
+  risk is low, because these pointers come from what the game is drawing
+  right now.
+- **Next step:** switch them to `GuestTryLoadU32`. That's a few guarded calls
+  per item per frame, so measure the cost with `perf_items`.
+
+### KI-65: Prewarm retries lose the visible-miss priority
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** native renderer, streaming
+- **Tracking:** none yet. Found while fixing KI-26 (#38).
+- **Where:** the retry branch of `ProcessPrewarmEntry` in
+  `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** the retry is pushed as
+  `g_prewarm_retry.push_back({e.mesh, uint16_t(e.retries - 1)})`, which drops
+  `e.miss`. `PrewarmCommit` then puts it back into the LIFO
+  `g_prewarm_queue`, not `g_miss_queue`. So a mesh the player can see, whose
+  first build failed, waits behind the speculative prewarm backlog and the
+  per-frame commit cap. That looks like longer pop-in or white surfaces while
+  streaming.
+- **Fix:** copy `e`, decrement its retries, and send miss retries back to
+  `g_miss_queue`.
+
+### KI-66: Prewarm workers re-queue texture and cube misses as meshes at startup
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** native renderer, streaming
+- **Tracking:** none yet. Found while fixing KI-26 (#38).
+- **Where:** `PrewarmWorkerLoop` in `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** when `base` or `g_r.device` is still null at startup, the
+  worker re-queues the whole entry with `g_prewarm_retry.push_back(e)`.
+  `PrewarmCommit` moves retries into `g_prewarm_queue` without keeping track
+  of what kind of entry each was, so a texture-only or cube entry is later
+  decoded as a mesh and that miss is lost. Startup only, low impact.
+- **Next step:** confirm by reading the code, then send misses back to
+  `g_miss_queue` with their kind kept.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
