@@ -907,6 +907,69 @@ repro steps; the entry says where the problem is and how it would show.
   today.
 - **Fix:** add a static check or a comment next to #44's format key.
 
+### KI-78: SDK settings.toml handling has the same reset and flush gaps as KI-59
+
+- **Status:** open (code reading only) · **Severity:** low–medium
+- **Area:** SDK settings
+- **Tracking:** none yet. Found while fixing KI-59 (#45).
+- **Where:** `SaveConfigValues` / `WriteConfigFile` in rexglue-sdk
+  `src/core/cvar.cpp`, and `EnsureSimpleSettingsConfig` in
+  `src/ui/overlay/simple_settings_overlay.cpp`.
+- **Problem:** `toml::parse_file` also throws `parse_error` when it can't open
+  the file. So a locked or unreadable `settings.toml` is treated as malformed
+  and rewritten with only the given cvars, which drops every other key. A
+  malformed file is rewritten with no backup. `WriteConfigFile` uses
+  temp-and-rename but never flushes the temp file to disk.
+- **Next step:** in the SDK fork, read the bytes separately before parsing,
+  back up a malformed file the way #45 does, and flush before the rename.
+  That needs an SDK-fork PR plus an "sdk: bump" commit.
+
+### KI-79: With profiles.toml unreadable, the career save goes to a temporary profile
+
+- **Status:** open · **Severity:** low
+- **Area:** profiles, saves
+- **Tracking:** none yet. Found while fixing KI-59 (#45).
+- **Where:** `LoadProfiles` and `OnFinalizePaths` in `src/skate3_user_settings.cpp`
+  and `src/skate3_app_common.cpp`.
+- **Problem:** after #45, when the file can't be read (it's locked, or the
+  backup couldn't be verified), the store is `save_blocked`. The game then
+  runs signed in as a temporary default "Player", and the career save goes to
+  that profile's XUID folder. In the locked test, a `B13E07DFF9AB6772` save
+  folder was created; the real file and saves were untouched.
+- **Also:** the startup default-profile write only happens when
+  `<exe dir>\skate3.toml` exists and `game_data_root` is set, so a dev build
+  run with neither never writes a default `profiles.toml`. That's probably
+  intended, but it isn't documented.
+- **Next step:** when `save_blocked` is set, show a dialog or boot signed out.
+  Confirm and document the default-profile write condition.
+
+### KI-80: Profiles with a missing id, gamertag or XUID are lost on the next save
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** profiles
+- **Tracking:** none yet. Found while fixing KI-59 (#45).
+- **Where:** `LoadProfiles` in `src/skate3_user_settings.cpp`.
+- **Problem:** such entries are dropped at load (#45 adds a warning), so the
+  next save removes them from the file. With #36's stricter
+  `ParseXuidString`, more hand-edited XUID strings parse to 0 and are
+  dropped.
+- **Next step:** keep unusable entries unchanged on save, or back the file up
+  the first time anything is dropped.
+
+### KI-81: `path.string()` may throw on non-ASCII user paths
+
+- **Status:** open (unverified) · **Severity:** low–medium
+- **Area:** SDK app startup, settings
+- **Tracking:** none yet. Found while fixing KI-59 (#45).
+- **Where:** rexglue-sdk `ReXApp::SetupEnvironment`, `ConfigFileContainsAnyKey`
+  and `SaveConfigValues`, which pass `path.string()` to `toml::parse_file`.
+- **Problem:** on Windows, `std::filesystem::path::string()` converts to the
+  ANSI code page and can throw for characters outside it. A user folder like
+  `C:\Users\Jiří` or one in a CJK script could make startup or settings saves
+  throw. #45's new code uses UTF-8 paths and avoids this.
+- **Next step:** test with a non-ASCII `--user_data_root`. If it throws, switch
+  those calls to `path.u8string()` or a wide-path open.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
