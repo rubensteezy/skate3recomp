@@ -710,37 +710,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** switch them to `GuestTryLoadU32`. That's a few guarded calls
   per item per frame, so measure the cost with `perf_items`.
 
-### KI-65: Prewarm retries lose the visible-miss priority
-
-- **Status:** open · **Severity:** low–medium
-- **Area:** native renderer, streaming
-- **Tracking:** none yet. Found while fixing KI-26 (#38).
-- **Where:** the retry branch of `ProcessPrewarmEntry` in
-  `src/skate3_native_scene_gpu.cpp`.
-- **Problem:** the retry is pushed as
-  `g_prewarm_retry.push_back({e.mesh, uint16_t(e.retries - 1)})`, which drops
-  `e.miss`. `PrewarmCommit` then puts it back into the LIFO
-  `g_prewarm_queue`, not `g_miss_queue`. So a mesh the player can see, whose
-  first build failed, waits behind the speculative prewarm backlog and the
-  per-frame commit cap. That looks like longer pop-in or white surfaces while
-  streaming.
-- **Fix:** copy `e`, decrement its retries, and send miss retries back to
-  `g_miss_queue`.
-
-### KI-66: Prewarm workers re-queue texture and cube misses as meshes at startup
-
-- **Status:** open (unconfirmed) · **Severity:** low
-- **Area:** native renderer, streaming
-- **Tracking:** none yet. Found while fixing KI-26 (#38).
-- **Where:** `PrewarmWorkerLoop` in `src/skate3_native_scene_gpu.cpp`.
-- **Problem:** when `base` or `g_r.device` is still null at startup, the
-  worker re-queues the whole entry with `g_prewarm_retry.push_back(e)`.
-  `PrewarmCommit` moves retries into `g_prewarm_queue` without keeping track
-  of what kind of entry each was, so a texture-only or cube entry is later
-  decoded as a mesh and that miss is lost. Startup only, low impact.
-- **Next step:** confirm by reading the code, then send misses back to
-  `g_miss_queue` with their kind kept.
-
 ### KI-67: Mesh decodes that always fail are retried every frame
 
 - **Status:** open · **Severity:** low
@@ -1282,6 +1251,59 @@ repro steps; the entry says where the problem is and how it would show.
 - **Emulated (F5), not fixed here:** in a gameplay presence context with
   `readback_resolve=none`, the emulated renderer would read the same stale
   memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
+
+### KI-65: Prewarm retries lost the visible-miss priority
+
+- **Status:** fix in review, tested unattended. Awaiting an in-game test.
+- **Tracking:** rubensteezy/skate3recomp#PRNUM. Found while fixing KI-26 (#38).
+- **Problem:** a mesh the player can see (a draw-path miss) whose first build
+  failed waited behind the speculative prewarm backlog and the per-frame
+  commit cap, which shows as longer pop-in or white surfaces while streaming.
+- **Cause:** the retry branch of `ProcessPrewarmEntry`
+  (`src/skate3_native_scene_gpu.cpp`) pushed
+  `g_prewarm_retry.push_back({e.mesh, uint16_t(e.retries - 1)})`, a new entry
+  with `miss` cleared. `PrewarmCommit` then put every retry into the LIFO
+  `g_prewarm_queue`. The retry lost its place in the miss FIFO, and its
+  result lost `PrewarmResult::miss`, so the commit no longer let it past the
+  32-per-frame gameplay cap.
+- **Fix:** the retry copies `e` and decrements its retries, so `miss` (and
+  every other field) survives. `PrewarmCommit` sends retries with `miss` set
+  back to `g_miss_queue` and the speculative ones back to `g_prewarm_queue`.
+  The retry count and backoff are unchanged (that's KI-67). Miss retries
+  routed back are counted in `g_prewarm_miss_retries`, shown as
+  `/ N miss retries` on the "taking over natively" line and as
+  `prewarm[miss_retry=N]` at the end of the perf line
+  (`skate3_native_render_scene_perf_log`).
+- **Tested:** unattended `--skate3_demo_path=true` boots, cwd = the install
+  folder. Prewarm counts match the usual baseline: D3D12 3068 and 3070,
+  Vulkan 3056, 0 dropped, 0 miss retries (no natural build failures in the
+  demo). With a temporary local-only hook that kept failing every 8th
+  speculative mesh (356 dropped, so the draw path missed them) and failed the
+  first build of each such miss, 91 (D3D12) and 92 (Vulkan) miss retries went
+  back to `g_miss_queue`, workers took them from there with `retries=7`, every
+  one built with `res.miss=true`, and the counter then stayed flat. Forced
+  speculative retries still went to `g_prewarm_queue`. Not yet checked in a
+  hands-on streaming session.
+
+### KI-66: Prewarm workers re-queued draw-path misses as speculative at startup
+
+- **Status:** fix in review, tested unattended (same change as KI-65). The
+  reported kind loss was not real.
+- **Tracking:** rubensteezy/skate3recomp#PRNUM. Found while fixing KI-26 (#38).
+- **Problem as reported:** when `base` or `g_r.device` is still null,
+  `PrewarmWorkerLoop` re-queues the entry with `g_prewarm_retry.push_back(e)`,
+  and `PrewarmCommit` was thought to lose its kind, so texture-only and cube
+  entries would be decoded as meshes.
+- **Checked:** that path pushes the whole `PrewarmEntry`, so `tex`, `wkey`,
+  `words`, `cube`, `miss` and `ui` all survive, and `ProcessPrewarmEntry`
+  picks the branch from those fields, not from the queue. No entry was ever
+  decoded as the wrong kind. What was lost is the queue: `PrewarmCommit` put
+  draw-path misses into `g_prewarm_queue` like the KI-65 retries. The path is
+  close to unreachable anyway: `EnsurePrewarmWorkers` starts the workers only
+  once `g_r.device` is set, nothing resets it, and misses are only queued
+  after the draw path has a guest base.
+- **Fix:** the KI-65 routing in `PrewarmCommit` covers it: a re-queued miss
+  goes back to `g_miss_queue` (and counts in `g_prewarm_miss_retries`).
 
 ### Reviewed and ruled out (code review)
 
