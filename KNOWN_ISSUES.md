@@ -77,21 +77,6 @@ repro steps; the entry says where the problem is and how it would show.
   suppressed or failing, its resolve may be lost, or the recomp may break a
   CPU-side step.
 
-### KI-16: Upload rings reused without a GPU completion check
-
-- **Status:** open · **Severity:** low–medium · was BT-09
-- **Area:** native renderer, GPU uploads
-- **Where:** `src/skate3_native_scene_gpu.cpp`, `src/skate3_native_scene_post.cpp`
-- **Problem:** several upload and constant rings pick their slot with
-  `frame_number % N`: the UI ring, the shadow constant buffer, the bone ring,
-  the photo FX CB slots (`% 4`) and the screen FX CB. None checks that the GPU
-  has finished with the slot. The comment above the ring sizes in
-  `skate3_native_scene_gpu_internal.h` notes that a slot was observed being
-  recycled while still in use. It would show as one-frame corruption of HUD,
-  bones or constants when the GPU falls behind.
-- **Fix idea:** gate each slot on `CompletedSubmission()`, or size the rings
-  from the device's frames in flight.
-
 ### KI-17: Texture routing maps grow without bound
 
 - **Status:** open · **Severity:** low–medium · was BT-10
@@ -418,6 +403,28 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-16: Upload rings reused without a GPU completion check
+
+- **Status:** fixed in rubensteezy/skate3recomp#28, in-game test pending · was BT-09
+- **Problem:** the native renderer's per-frame upload rings (bone + ROPA
+  vertices, UI vertices, shadow constants, photo FX constants, screen FX
+  constants) picked their region with `frame_number % N` and never checked
+  that the GPU had finished with it. A GPU more than N-1 frames behind would
+  read a later frame's HUD vertices, bones or constants. The bone ring had
+  already been deepened from 4 to 8 after hair and garment corruption on
+  Vulkan under load.
+- **Fix:** `UploadRingRegions` (`skate3_native_scene_gpu_internal.h`, acquire
+  in `skate3_native_scene_gpu.cpp`) is shared by all five rings. Each region
+  records the last submission that used it (`CurrentSubmission()`), and a new
+  frame takes the next region whose submission has completed
+  (`CompletedSubmission()`). Normally that is the same round-robin region as
+  before, so there is no stall. The photo FX and screen FX rings went from 4
+  to 8 regions like the others.
+- **Remaining gap:** nrhi has no fence wait, so if every region is still in
+  flight the oldest is reused (the old behavior) and the log says "upload ring
+  <name>: all N regions in flight" (rate-limited). "upload ring <name>: K/N
+  regions in flight" lines log a new high of half the ring or more.
 
 ### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
 
