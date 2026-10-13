@@ -415,7 +415,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
 
-- **Status:** fixed in rubensteezy/skate3recomp#PRNUM. Confirmed in-game on
+- **Status:** fixed in rubensteezy/skate3recomp#25. Confirmed in-game on
   D3D12 and Vulkan on 2026-10-12.
 - **Symptom:** during Own the Lot (and Own the Spot) events the score and
   timer, objective text, challenge list and spot markers flickered in and out
