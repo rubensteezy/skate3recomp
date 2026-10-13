@@ -218,15 +218,6 @@ repro steps; the entry says where the problem is and how it would show.
   builds. This repository has no CI, so neither these nor the Python tests
   (`python -m unittest discover -s tests`) run automatically.
 
-### KI-32: Small cleanups
-
-- **Status:** open · **Severity:** low · was BT-25
-- **Problems:**
-  - Screenshots taken within the same second get the same filename.
-  - `blur_tex` isn't recreated when the output format changes.
-  - The `kSceneRingFrames` comment says about 900, but the value is 2400.
-  - The header declaring `MaybeDumpSceneRing` is missing includes.
-
 ### KI-37: Dead code for building without Title Update 3
 
 - **Status:** open · **Severity:** low
@@ -1025,6 +1016,38 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-32: Small cleanups
+
+- **Status:** fix in review (PR pending), tested unattended · **Severity:**
+  low · was BT-25
+- **Problems and fixes:**
+  - Screenshots taken within the same second got the same filename, so the
+    later save overwrote the earlier one. `ScreenshotPath`
+    (`src/skate3_screenshot.cpp`) now writes
+    `shot_YYYYMMDD_HHMMSS_mmm[_tag].png`. The millisecond stamp is strictly
+    increasing per process, so captures in the same millisecond still
+    differ, and name order stays capture order.
+  - `blur_tex` (popup blur, also the photo-grab source) was created once and
+    never rebuilt, and `menu_blur_tex` was keyed on size only. Both now
+    record the format they were built with and are recreated when the guest
+    output format changes (`EnsureBlurOutlineTargets`,
+    `src/skate3_native_scene_gpu.cpp`), like the blur PSOs. The guest output
+    is a fixed R10G10B10A2 on both backends today, so this guards a future
+    change; HDR on/off changes the scene format, not this one.
+  - `kSceneRingFrames` is 2400 on purpose: the RB+A note says the dump is
+    retroactive about 17 s, which is 2400 frames at 144 fps. The four
+    "~900 frames" comments were stale and now say 2400.
+  - `skate3_native_scene_state.h` (`MaybeDumpSceneRing`) now includes
+    `<ctime>` and `<fstream>`. Compiled on its own, the old header failed on
+    `std::ofstream`; the new one compiles.
+- **Tested:** a unit check of the naming code (3000-name burst, 4 threads)
+  found no duplicates and sorted order equal to capture order. Two
+  unattended boots (HDR on, HDR off) ran the post sweep, which saved 7
+  screenshots with the new names (up to three in one second), opened the
+  pause menu with its popup blur showing, and logged no blur errors. The
+  settings-overlay blur (`menu_blur_tex`, Esc/F1) needs a key press and was
+  not exercised.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
