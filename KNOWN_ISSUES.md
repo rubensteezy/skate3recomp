@@ -227,6 +227,35 @@ repro steps; the entry says where the problem is and how it would show.
   - The `kSceneRingFrames` comment says about 900, but the value is 2400.
   - The header declaring `MaybeDumpSceneRing` is missing includes.
 
+### KI-37: Dead code for building without Title Update 3
+
+- **Status:** open · **Severity:** low
+- **Area:** build, codegen
+- **Tracking:** none yet. Follow-up to KI-33 (#27).
+- **Problem:** since #27, configure fails without TU3 codegen, so
+  `SKATE3_HAS_TITLE_UPDATE_CODEGEN` and `SKATE3_HAS_TITLE_UPDATE` are always
+  on. Everything behind the off branch is dead:
+  - `CMakeLists.txt`: the default `SKATE3_FUNCTION_CONFIG_INCLUDES` pointing at
+    `config/skate3_functions.toml`, the `if(SKATE3_HAS_TITLE_UPDATE_CODEGEN)`
+    wrappers, and the `=0` branch of the compile definition.
+  - `config/skate3_functions.toml`: the retail-only function boundaries.
+    Nothing reads it any more.
+  - `src/exception_compat.cpp`: the `#else` branch (the retail guard
+    `sub_82F44E40` and its trampoline).
+  - `src/skate3_app_common.cpp`: the `#if !SKATE3_HAS_TITLE_UPDATE`
+    `Sub82EBAE4CImpl` and its `SetFunction(0x82EBAE4C)` registration, the
+    non-TU `#else` of the macOS ISO-install chain, and the always-true guard
+    around the title update installer check.
+  - `src/skate3_guest_heap_diag.cpp`: the `#else` stub of
+    `Skate3GuestHeapCategoryFreeBytes`.
+  - `src/skate3_options_menu.cpp`: the always-true `SKATE3_HAS_TITLE_UPDATE`
+    guards and any `#else` stubs paired with them.
+  - The static_asserts #27 added to the hook blocks can go if the macro itself
+    is removed. Keep them if it stays.
+- **Fix:** delete the dead branches. Behaviour in TU3 builds doesn't change.
+  Test with configure + build, then the unattended `--skate3_demo_path=true`
+  boot.
+
 ### KI-36: Event-start 2D draws with a 32-byte vertex layout are dropped
 
 - **Status:** open
