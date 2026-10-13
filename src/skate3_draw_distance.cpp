@@ -28,11 +28,14 @@
 //     camera distance. Static world geometry is not routed through these
 //     bands (it fails the entity-type gate), hence the separate cull hooks.
 //
-// The game refreshes (2) and (3) every frame and (1) on config apply, so each
-// hook rescales the freshly written values in place and nothing compounds.
+// The game refreshes (2) and (3) every frame and (1) on config apply. Both
+// scaled values, (1) and (3), are derived from a remembered game original
+// (original * scale), never by multiplying what is currently in guest memory,
+// so a frame where the game does not rewrite a value cannot compound it.
 // The cull threshold is additionally reapplied once per frame from the
 // GetLODDistancesFromAttrib hook (the view's cull object is at view+8) so
-// cvar changes take effect without a config reload.
+// cvar changes take effect without a config reload. Cull objects come and go
+// with their views; their slots are recycled (see CullThresholdSlot).
 
 #include "generated/skate3_init.h"
 #include "native/skate3_native_guest_read.h"
@@ -144,15 +147,41 @@ inline bool PlausibleGuestAddr(uint32_t addr) { return addr >= 0x10000; }
 // wrote: a current value that differs from our last write is a fresh game
 // value and becomes the new base. The scale is always derived from the base,
 // never from the current value, so nothing compounds.
+//
+// Cull objects come and go with the scene render views (map loads, the
+// frontend, Create-a-Character and replay views each bring their own), and
+// there is no destroy hook, so slots are recycled instead of freed:
+//
+//  - A slot is only load-bearing while the guest memory still holds the bits
+//    we wrote. Once it holds anything else, the object was freed and reused,
+//    or the game reprogrammed it; either way re-adding the address later
+//    takes the current value as a fresh base, so such a slot is dropped
+//    without touching guest memory.
+//  - If every slot is load-bearing, the least recently seen one is evicted
+//    and its original value written back first. That undoes our scaling, so
+//    an evicted object that is still alive is re-seen at its true base and
+//    never scaled twice. This is the "slots ran out" case and it is logged.
 struct CullThresholdSlot {
   uint32_t addr = 0;
   uint32_t base_bits = 0;
   uint32_t written_bits = 0;
+  uint64_t last_seen = 0;
 };
 
+constexpr size_t kCullSlotCapacity = 32;
+constexpr int64_t kCullSlotWarnIntervalMs = 10000;
+
 std::mutex g_cull_slots_mutex;
-CullThresholdSlot g_cull_slots[16];
+CullThresholdSlot g_cull_slots[kCullSlotCapacity];
 size_t g_cull_slot_count = 0;
+uint64_t g_cull_slot_tick = 0;
+// Load-bearing evictions since the last warning (rate-limited log).
+uint64_t g_cull_slot_evictions = 0;
+uint64_t g_cull_slot_evictions_logged = 0;
+int64_t g_cull_slot_last_warn_ms = 0;
+bool g_cull_slot_recycle_logged = false;
+
+int64_t SteadyMs();
 
 uint32_t ScaledThresholdBits(uint32_t base_bits) {
   const double scale = REXCVAR_GET(skate3_draw_distance_scale);
@@ -167,7 +196,81 @@ uint32_t ScaledThresholdBits(uint32_t base_bits) {
   return bits;
 }
 
-void EnsureCullThresholdScaled(uint8_t* base, uint32_t cull_object) {
+// True when the slot's guest word still holds the bits we wrote there, i.e.
+// dropping the slot without restoring the base would leave a scaled value
+// behind that a later re-add would mistake for the game's own. A word that
+// cannot be read (range revoked) is not load-bearing.
+bool CullSlotLoadBearing(uint8_t* base, const CullThresholdSlot& slot) {
+  if (slot.written_bits == slot.base_bits) {
+    return false;
+  }
+  uint32_t raw;
+  if (!skate3::native_scene::GuestTryCopy(&raw, base + slot.addr, 4)) {
+    return false;
+  }
+  return __builtin_bswap32(raw) == slot.written_bits;
+}
+
+// Finds a slot for a newly seen threshold address once the table is full.
+// Caller holds g_cull_slots_mutex.
+CullThresholdSlot* RecycleCullSlot(uint8_t* base, uint32_t new_addr) {
+  const bool debug = REXCVAR_GET(skate3_draw_distance_debug);
+  // Prefer a slot that is no longer load-bearing, least recently seen first.
+  CullThresholdSlot* stale = nullptr;
+  CullThresholdSlot* lru = &g_cull_slots[0];
+  for (size_t i = 0; i < g_cull_slot_count; ++i) {
+    CullThresholdSlot& s = g_cull_slots[i];
+    if (s.last_seen < lru->last_seen) {
+      lru = &s;
+    }
+    if ((stale == nullptr || s.last_seen < stale->last_seen) &&
+        !CullSlotLoadBearing(base, s)) {
+      stale = &s;
+    }
+  }
+  if (stale != nullptr) {
+    if (!g_cull_slot_recycle_logged) {
+      g_cull_slot_recycle_logged = true;
+      REXLOG_INFO(
+          "draw_distance: cull slot table full ({} slots); recycling slots of "
+          "cull objects that are gone or were reprogrammed",
+          kCullSlotCapacity);
+    }
+    if (debug) {
+      REXLOG_INFO(
+          "draw_distance: cull slot recycled 0x{:08X} -> 0x{:08X} (stale)",
+          stale->addr - 6064, new_addr - 6064);
+    }
+    return stale;
+  }
+  // Every slot still carries our scaling: more cull objects are live than
+  // we have slots for. Hand the least recently seen one back to the game
+  // (write its original value back, so if it is still alive it is re-seen
+  // unscaled and never scaled twice) and reuse the slot.
+  const uint32_t raw = __builtin_bswap32(lru->base_bits);
+  std::memcpy(base + lru->addr, &raw, 4);
+  ++g_cull_slot_evictions;
+  const int64_t now = SteadyMs();
+  if (g_cull_slot_evictions_logged == 0 ||
+      now - g_cull_slot_last_warn_ms >= kCullSlotWarnIntervalMs) {
+    REXLOG_WARN(
+        "draw_distance: all {} cull slots in use; evicted cull object "
+        "0x{:08X} (restored to its original threshold) for 0x{:08X}. "
+        "{} eviction(s) since the last report; evicted objects draw at the "
+        "original distance until seen again",
+        kCullSlotCapacity, lru->addr - 6064, new_addr - 6064,
+        g_cull_slot_evictions - g_cull_slot_evictions_logged);
+    g_cull_slot_evictions_logged = g_cull_slot_evictions;
+    g_cull_slot_last_warn_ms = now;
+  }
+  return lru;
+}
+
+// fresh: the caller knows the current value was just written by the game
+// (the config-apply setter hook), so it is the new base unconditionally,
+// even if it happens to equal the bits we wrote last time.
+void EnsureCullThresholdScaled(uint8_t* base, uint32_t cull_object,
+                               bool fresh) {
   if (!PlausibleGuestAddr(cull_object)) {
     return;
   }
@@ -184,16 +287,26 @@ void EnsureCullThresholdScaled(uint8_t* base, uint32_t cull_object) {
     }
   }
   if (slot == nullptr) {
-    if (g_cull_slot_count >= sizeof(g_cull_slots) / sizeof(g_cull_slots[0])) {
-      return;
+    if (g_cull_slot_count < kCullSlotCapacity) {
+      slot = &g_cull_slots[g_cull_slot_count++];
+    } else {
+      slot = RecycleCullSlot(base, addr);
     }
-    slot = &g_cull_slots[g_cull_slot_count++];
     slot->addr = addr;
     slot->base_bits = current;
     slot->written_bits = current;
-  } else if (current != slot->written_bits) {
+    if (REXCVAR_GET(skate3_draw_distance_debug)) {
+      float value;
+      std::memcpy(&value, &current, 4);
+      REXLOG_INFO(
+          "draw_distance: cull slot added obj=0x{:08X} threshold={} "
+          "({} of {} slots used)",
+          cull_object, value, g_cull_slot_count, kCullSlotCapacity);
+    }
+  } else if (fresh || current != slot->written_bits) {
     slot->base_bits = current;
   }
+  slot->last_seen = ++g_cull_slot_tick;
   const uint32_t scaled = ScaledThresholdBits(slot->base_bits);
   if (scaled != current) {
     const uint32_t raw = __builtin_bswap32(scaled);
@@ -217,7 +330,47 @@ void RecordCullThreshold(uint8_t* base, uint32_t cull_object) {
         LoadGuestF32(base, cull_object + 5940),
         LoadGuestF32(base, cull_object + 5944));
   }
-  EnsureCullThresholdScaled(base, cull_object);
+  EnsureCullThresholdScaled(base, cull_object, /*fresh=*/true);
+}
+
+// Character LOD bands of one SceneRenderView, see sub_827E1AD8 below. Keyed
+// by view; the six values are squared switch distances at view+23760..23780.
+// original_bits is the game's last unscaled write, written_bits what we
+// stored on top of it.
+struct LodBandRecord {
+  uint32_t view = 0;
+  uint64_t last_seen = 0;
+  uint32_t original_bits[6] = {};
+  uint32_t written_bits[6] = {};
+};
+
+constexpr uint32_t kLodBandFirstOffset = 23760;
+constexpr size_t kLodBandRecordCapacity = 16;
+
+std::mutex g_lod_bands_mutex;
+LodBandRecord g_lod_bands[kLodBandRecordCapacity];
+uint64_t g_lod_bands_tick = 0;
+
+// Returns the record for `view`, taking over the least recently seen one
+// when the view is new. Losing a record is harmless: it only drops the
+// pre-call restore below for a view that has not been updated in a while,
+// and the game rewrites all six bands on every call anyway. Caller holds
+// g_lod_bands_mutex.
+LodBandRecord& LodBandRecordFor(uint32_t view, bool* is_new) {
+  LodBandRecord* lru = &g_lod_bands[0];
+  for (LodBandRecord& r : g_lod_bands) {
+    if (r.view == view) {
+      *is_new = false;
+      return r;
+    }
+    if (r.last_seen < lru->last_seen) {
+      lru = &r;
+    }
+  }
+  *is_new = true;
+  *lru = LodBandRecord{};
+  lru->view = view;
+  return *lru;
 }
 
 struct ProbeRecord {
@@ -819,21 +972,59 @@ extern "C" REX_FUNC(sub_8247BD28) {
 // switch distances on the view every frame. Scale them by k^2 (squared
 // domain), and take the per-frame opportunity to reapply the cull threshold
 // on this view's cull object.
+//
+// The scaled value is always original * k^2, never "whatever is there"
+// * k^2. Before the game's call, any band that still holds the value we
+// wrote last time is put back to the game's original; after the call every
+// band therefore holds an original, either freshly written by the game (the
+// TU3 body stores all six on every path) or the one we restored, and it is
+// scaled from that. Running the hook without a game rewrite cannot compound.
 extern "C" REX_FUNC(sub_827E1AD8) {
   const uint32_t view = ctx.r3.u32;
-  __imp__sub_827E1AD8(ctx, base);
-  MaybePollDebugMarkerKey();
-  if (!PlausibleGuestAddr(view)) {
-    return;
-  }
-  const double lod_scale = REXCVAR_GET(skate3_lod_distance_scale);
-  if (std::abs(lod_scale - 1.0) > kScaleEpsilon) {
-    const double squared = lod_scale * lod_scale;
-    for (uint32_t offset = 23760; offset <= 23780; offset += 4) {
-      const uint32_t addr = view + offset;
-      StoreGuestF32(base, addr,
-                    float(double(LoadGuestF32(base, addr)) * squared));
+  const bool view_ok = PlausibleGuestAddr(view);
+  if (view_ok) {
+    std::lock_guard<std::mutex> lock(g_lod_bands_mutex);
+    bool is_new = false;
+    LodBandRecord& rec = LodBandRecordFor(view, &is_new);
+    rec.last_seen = ++g_lod_bands_tick;
+    if (!is_new) {
+      for (uint32_t i = 0; i < 6; ++i) {
+        const uint32_t addr = view + kLodBandFirstOffset + i * 4;
+        if (rec.written_bits[i] != rec.original_bits[i] &&
+            LoadGuestU32(base, addr) == rec.written_bits[i]) {
+          StoreGuestU32(base, addr, rec.original_bits[i]);
+        }
+      }
     }
   }
-  EnsureCullThresholdScaled(base, LoadGuestU32(base, view + 8));
+  __imp__sub_827E1AD8(ctx, base);
+  MaybePollDebugMarkerKey();
+  if (!view_ok) {
+    return;
+  }
+  {
+    const double lod_scale = REXCVAR_GET(skate3_lod_distance_scale);
+    const bool scaling = std::abs(lod_scale - 1.0) > kScaleEpsilon;
+    const double squared = lod_scale * lod_scale;
+    std::lock_guard<std::mutex> lock(g_lod_bands_mutex);
+    bool is_new = false;
+    LodBandRecord& rec = LodBandRecordFor(view, &is_new);
+    rec.last_seen = ++g_lod_bands_tick;
+    for (uint32_t i = 0; i < 6; ++i) {
+      const uint32_t addr = view + kLodBandFirstOffset + i * 4;
+      const uint32_t original_bits = LoadGuestU32(base, addr);
+      uint32_t scaled_bits = original_bits;
+      if (scaling) {
+        float original;
+        std::memcpy(&original, &original_bits, 4);
+        const float scaled = float(double(original) * squared);
+        std::memcpy(&scaled_bits, &scaled, 4);
+        StoreGuestU32(base, addr, scaled_bits);
+      }
+      rec.original_bits[i] = original_bits;
+      rec.written_bits[i] = scaled_bits;
+    }
+  }
+  EnsureCullThresholdScaled(base, LoadGuestU32(base, view + 8),
+                            /*fresh=*/false);
 }
