@@ -8539,10 +8539,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   uint32_t drawn = 0;
   uint32_t item_index = 0;
   // F7 scene-composition ring (RequestSceneRingDump): one compact signature
-  // per scene item per frame, ~900 frames deep. A 1-2 frame artifact (the
-  // dam-bank blue flash) is uncapturable by F10/F11; the ring lets a
-  // keypress seconds later name exactly which item appeared / vanished /
-  // changed textures on the artifact frame. Entries are recorded at
+  // per scene item per frame, kSceneRingFrames (2400) deep. A 1-2 frame
+  // artifact (the dam-bank blue flash) is uncapturable by F10/F11; the ring
+  // lets a keypress seconds later name exactly which item appeared /
+  // vanished / changed textures on the artifact frame. Entries are recorded at
   // classification below; draw_item stamps the issued-draw count, so an
   // item that early-returned (deferred mesh, skip-new, fade skip) shows
   // drawn=0 that frame.
