@@ -442,7 +442,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-35: Team-member portraits in character creation show old photos
 
-- **Status:** fixed in this PR. Confirmed in-game on D3D12 and Vulkan on
+- **Status:** fixed in rubensteezy/skate3recomp#26. Confirmed in-game on D3D12 and Vulkan on
   2026-10-12.
 - **Symptom:** in Pause > Create Skater, the boxes of the extra team members
   showed photos from earlier events instead of each skater's portrait, a
