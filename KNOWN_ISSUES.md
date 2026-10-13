@@ -1144,11 +1144,11 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-59: A malformed profiles.toml silently wiped all profiles
 
-- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM, tested
+- **Status:** fix in review in rubensteezy/skate3recomp#45, tested
   unattended (awaiting an in-game save from the settings dialog) ·
   **Severity:** low–medium
 - **Area:** user settings, profiles
-- **Tracking:** rubensteezy/skate3recomp#PRNUM. Found while fixing KI-24 (#36).
+- **Tracking:** rubensteezy/skate3recomp#45. Found while fixing KI-24 (#36).
 - **Where:** `LoadProfiles` and `SaveProfiles` in
   `src/skate3_user_settings.cpp`, the new `src/skate3_safe_file.cpp`, and the
   `save_profile` lambda and `OnFinalizePaths` in `src/skate3_app_common.cpp`.
