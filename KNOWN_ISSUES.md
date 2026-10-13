@@ -111,16 +111,6 @@ repro steps; the entry says where the problem is and how it would show.
   seen. LOD distances are multiplied in place every frame, which relies on the
   game rewriting them each frame.
 
-### KI-19: DLC and recipe directory scans can throw at startup
-
-- **Status:** open · **Severity:** low–medium · was BT-12
-- **Area:** app startup
-- **Where:** `src/skate3_app_common.cpp`
-- **Problem:** the DLC and recipe scans use the non-throwing iterator
-  constructor, but `operator++` can still throw (for example on a permissions
-  error partway through a folder), which would end startup with an exception.
-- **Fix:** step with `increment(ec)`.
-
 ### KI-20: Depth-view caches compare textures by pointer
 
 - **Status:** open · **Severity:** low–medium · was BT-13
@@ -531,6 +521,37 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-19: DLC and recipe directory scans can throw at startup
+
+- **Status:** fix in review (branch `fix/ki19-dir-scan`), awaiting in-game
+  test · **Severity:** low–medium · was BT-12
+- **Area:** app startup
+- **Where:** `Skate3BaseApp::InstallDlcPackages`,
+  `Skate3BaseApp::DiscoverRecipeAliases` and `Skate3BaseApp::InstallRecipeOverlay`
+  (`src/skate3_app_common.cpp`), `skate3::shader_disasm::RunIfRequested`
+  (`src/skate3_shader_disasm.cpp`, dev tool)
+- **Problem:** the scans used the non-throwing iterator constructor inside a
+  range-for, but the range-for's `operator++` throws on any error partway
+  through a folder. The DLC scan is recursive, so a subfolder of a `dlc`
+  folder without read access threw `filesystem_error` out of startup. The
+  throwing `is_directory`, `is_regular_file` and `exists` calls around the
+  scans could do the same.
+- **Fix:** each loop steps with `increment(ec)` and logs a warning naming the
+  folder when it fails. The standard library ends the iteration on such an
+  error, so the DLC scan also probes each subfolder before recursing and skips
+  an unreadable one with `Skipping unreadable Skate 3 DLC subfolder ...`
+  instead of losing the rest of the folder. The status checks in and around
+  the loops use the `error_code` overloads. Nothing changes when no error
+  occurs. The installer and screenshot code have no directory scans.
+- **Tested:** relwithdebinfo, unattended boot (`--skate3_demo_path=true`)
+  with `--user_data_root=` on a scratch folder whose `dlc` holds an
+  unreadable subfolder (`icacls /deny %USERNAME%:(RX)`), a loose file after
+  it and a readable nested subfolder. The boot logged the skip warning for
+  the unreadable subfolder, still scanned the two files after it and reached
+  gameplay. With the deny removed it scanned all three files, no warning.
+  The recipe overlay logged 11 aliases, the same as earlier builds. Not yet
+  tested: a normal boot with real DLC installed.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
