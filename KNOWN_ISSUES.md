@@ -524,8 +524,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-19: DLC and recipe directory scans can throw at startup
 
-- **Status:** fix in review (branch `fix/ki19-dir-scan`), awaiting in-game
-  test · **Severity:** low–medium · was BT-12
+- **Status:** fix in review in rubensteezy/skate3recomp#31, awaiting
+  in-game test · **Severity:** low–medium · was BT-12
 - **Area:** app startup
 - **Where:** `Skate3BaseApp::InstallDlcPackages`,
   `Skate3BaseApp::DiscoverRecipeAliases` and `Skate3BaseApp::InstallRecipeOverlay`
