@@ -101,16 +101,6 @@ repro steps; the entry says where the problem is and how it would show.
   for the whole session.
 - **Fix idea:** prune by `last_used_frame`, like `tex_store`.
 
-### KI-18: Draw-distance slots never freed; LOD distances scaled in place
-
-- **Status:** open · **Severity:** low–medium · was BT-11
-- **Area:** draw distance
-- **Where:** `src/skate3_draw_distance.cpp`
-- **Problem:** the 16 fixed cull-threshold slots are never freed, so
-  draw-distance scaling silently stops once enough cull objects have been
-  seen. LOD distances are multiplied in place every frame, which relies on the
-  game rewriting them each frame.
-
 ### KI-19: DLC and recipe directory scans can throw at startup
 
 - **Status:** open · **Severity:** low–medium · was BT-12
@@ -531,6 +521,46 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-18: Draw-distance slots never freed; LOD distances scaled in place
+
+- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM, awaiting in-game
+  test · **Severity:** low–medium · was BT-11
+- **Area:** draw distance
+- **Where:** `src/skate3_draw_distance.cpp` (`EnsureCullThresholdScaled`,
+  `RecycleCullSlot`, the `sub_827E1AD8` hook)
+- **Problem:** the 16 fixed cull-threshold slots were never freed, so
+  draw-distance scaling silently stopped once enough cull objects had been
+  seen. LOD distances were multiplied in place every frame, which relied on
+  the game rewriting them each frame.
+- **Cause:** a slot was added the first time a cull object's threshold
+  address was seen and kept forever. A full table returned without scaling
+  or logging. There is no destroy hook to free a slot. The cull object is
+  placement-constructed (`sub_8288B2E8`) inside the render system's arena
+  (`sub_8285B780`); a boot to gameplay sees only one, so the table only fills
+  after many render-system rebuilds or extra views. The LOD hook read the six
+  bands back from guest memory and multiplied them. TU3
+  `GetLODDistancesFromAttrib` stores all six on every path, so it did not
+  compound in practice. But nothing in the hook guaranteed that.
+- **Fix:** the slot table has 32 entries. Each slot records when it was last
+  seen. A slot whose guest word no longer holds the bits we wrote is not
+  load-bearing: the object is gone or the game reprogrammed it, so it is
+  recycled silently. When every slot is load-bearing, the least recently
+  seen one is evicted. Its original threshold is written back first, so a
+  still-live object is re-seen at its true base and is never scaled twice.
+  The first recycle logs `cull slot table full (32 slots); recycling ...`
+  once. Each eviction logs `all 32 cull slots in use; evicted ...`, at most
+  once every 10 s, with a count. The config-apply setter hook now always
+  takes the game's value as the new base. The LOD hook keeps each view's six
+  originals and the bits it wrote. Before the game's call it puts back any
+  band that still holds our value. After the call every band holds an
+  original, and it writes `original * k^2`.
+- **Tested:** relwithdebinfo build; unattended boot
+  (`--skate3_demo_path=true --skate3_draw_distance_debug=true`) reaches
+  gameplay and logs one `cull slot added obj=0x495C31A0 threshold=0.2
+  (1 of 32 slots used)`. No slot warnings. The recycle and eviction paths
+  were not hit in that boot. Long free roam on D3D12 and Vulkan still needs
+  a human test.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
