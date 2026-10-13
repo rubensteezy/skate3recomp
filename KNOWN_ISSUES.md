@@ -1019,8 +1019,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-32: Small cleanups
 
-- **Status:** fix in review (PR pending), tested unattended · **Severity:**
-  low · was BT-25
+- **Status:** fix in review in rubensteezy/skate3recomp#44, tested unattended ·
+  **Severity:** low · was BT-25
 - **Problems and fixes:**
   - Screenshots taken within the same second got the same filename, so the
     later save overwrote the earlier one. `ScreenshotPath`
