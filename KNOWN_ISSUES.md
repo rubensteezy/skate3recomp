@@ -600,6 +600,50 @@ repro steps; the entry says where the problem is and how it would show.
   call into it. Unlikely, since the process exits right after.
 - **Fix:** add `UnregisterChangeCallbacks("fullscreen")` to `OnDestroy`.
 
+### KI-58: SDK `ParseXuid` misreads decimal XUIDs
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK user profile
+- **Tracking:** none yet. Found while fixing KI-24 (#36).
+- **Where:** `ParseXuid` in rexglue-sdk `src/system/xam/user_profile.cpp`, used
+  by `UserProfile::UserProfile`.
+- **Problem:** it's a copy of the game's old parser and still tries hex
+  first, so a decimal `--user_profile_xuid=12345` passed by hand becomes XUID
+  0x12345. The game itself always passes hex from `FormatXuid`, so normal
+  play is unaffected.
+- **Fix:** apply #36's rules in the SDK fork (a `0x` prefix or 16 hex digits
+  is hex; other all-digit strings are decimal), or have the SDK call one
+  shared parser.
+
+### KI-59: A malformed profiles.toml silently wipes all profiles
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** user settings, profiles
+- **Tracking:** none yet. Found while fixing KI-24 (#36).
+- **Where:** `LoadProfiles` in `src/skate3_user_settings.cpp`, and the
+  `save_profile` lambda in `src/skate3_app_common.cpp`.
+- **Problem:** `LoadProfiles` catches `toml::parse_error`, returns an empty
+  store and logs nothing. The next profile save then calls
+  `EnsureUsableProfileStore`, which adds a default "Player" profile, and
+  overwrites the user's file with it. Any malformed `profiles.toml` (a hand
+  edit, invalid UTF-8, see KI-60) destroys every profile on the next save.
+- **Next step:** log the parse error, and back up or refuse to overwrite a file
+  that didn't parse.
+
+### KI-60: Gamertag truncation can produce invalid UTF-8
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK settings overlay, profiles
+- **Tracking:** none yet. Found while fixing KI-24 (#36).
+- **Where:** `CopyToBuffer` in rexglue-sdk
+  `src/ui/overlay/simple_settings_overlay.cpp`.
+- **Problem:** the gamertag is copied into `gamertag_buf_[32]` byte by byte,
+  which can cut a multi-byte UTF-8 character in half. `SaveProfile` then
+  writes invalid UTF-8, toml++ rejects the file, and KI-59 wipes the
+  profiles. It needs a gamertag over 31 bytes with a non-ASCII character at
+  the cut, so in practice only hand-edited names hit it.
+- **Fix:** truncate at a UTF-8 character boundary.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
