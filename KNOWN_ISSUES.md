@@ -844,7 +844,7 @@ repro steps; the entry says where the problem is and how it would show.
 ### KI-26: ProcessPrewarmEntry did an unguarded read on a worker
 
 - **Status:** fix in review, tested unattended · was BT-19
-- **Tracking:** branch `fix/ki26-prewarm-guarded-read`
+- **Tracking:** rubensteezy/skate3recomp#38
 - **Problem:** `ProcessPrewarmEntry` (`src/skate3_native_scene_gpu.cpp`) made
   a guarded copy of the mesh record into `record` and never used it. It then
   read the island count (+0x38) and island-params pointer (+0x44) with raw
