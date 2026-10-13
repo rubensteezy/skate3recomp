@@ -557,6 +557,49 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** release the buffers once a session's dumps are written, and
   add a counter to the file name.
 
+### KI-55: App callbacks that capture `this` are never cleared on shutdown
+
+- **Status:** open · **Severity:** low
+- **Area:** app lifetime
+- **Tracking:** none yet. Found while fixing KI-23 (#35).
+- **Where:** `OnPostSetup` / `OnShutdown` in `src/skate3_app_common.cpp`.
+- **Problem:** six callbacks capture `this` and are never cleared:
+  `input_system->SetActiveCallback`, `SetMenuChordCallback`,
+  `demo_path::SetUiInputProvider` and the three `options_menu::Set*Callback`.
+  The active callback also reads `simple_settings_dialog_` on the input path
+  while `OnShutdown` resets it on the UI thread. That's a data race or
+  use-after-free on any path where `OnShutdown` runs while the guest is
+  still alive. Today that is mainly Close Game on macOS (`QuitFromUIThread`,
+  which ends the guest after `OnShutdown`).
+- **Fix:** clear these callbacks (null or no-op) at the top of `OnShutdown`.
+
+### KI-56: SDK key binds: duplicate registration and callbacks under the lock
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK input
+- **Tracking:** none yet. Found while fixing KI-23 (#35).
+- **Where:** `RegisterBind` / `UnregisterBind` / `ProcessKeyEvent` in
+  rexglue-sdk `src/ui/keybinds.cpp`.
+- **Problem:** re-registering a name appends a duplicate entry and registers
+  the cvar again, while `UnregisterBind` only nulls the first match. Bind
+  callbacks also run under the non-recursive `g_binds_mutex`, so a bind that
+  registers or unregisters a bind would deadlock. Neither happens today,
+  because `RestartGame` starts a new process instead of re-registering.
+- **Next step:** make `RegisterBind` replace by name, and call callbacks
+  outside the lock. That needs an SDK-fork PR plus an "sdk: bump" commit.
+
+### KI-57: SDK `fullscreen` change callback is never unregistered
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK app lifetime
+- **Tracking:** none yet. Found while fixing KI-23 (#35).
+- **Where:** rexglue-sdk `src/ui/rex_app.cpp`. `SetupPresentation` registers a
+  `fullscreen` change callback that captures `this`, and `OnDestroy` only
+  unregisters `show_fps_counter`.
+- **Problem:** a `fullscreen` change after the app object is destroyed would
+  call into it. Unlikely, since the process exits right after.
+- **Fix:** add `UnregisterChangeCallbacks("fullscreen")` to `OnDestroy`.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
