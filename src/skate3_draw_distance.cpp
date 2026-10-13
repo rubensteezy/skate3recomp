@@ -81,7 +81,7 @@ REXCVAR_DEFINE_DOUBLE(skate3_draw_distance_stream_probe, 0.0, "Skate 3",
                       "they are visible. 0 = original console behavior.")
     .range(0.0, 1000.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
-REXCVAR_DEFINE_DOUBLE(skate3_draw_distance_stream_probe_reserve_mb, 10.0,
+REXCVAR_DEFINE_DOUBLE(skate3_draw_distance_stream_probe_reserve_mb, 12.0,
                       "Skate 3",
                       "Keep at least this many MB free in the game's streaming "
                       "heap while pre-streaming: probe cells beyond what fits "
@@ -278,7 +278,10 @@ ProbeCache g_probe_cache[2];
 // go first, since records are distance-sorted), above reserve + margin it
 // grows by one. Changes are spaced a second apart so unloads and loads have
 // landed before the next decision, and growth waits for the focus's set to
-// be resident. Slots as for g_probe_cache.
+// be resident. The gather does not run while a menu is up, so the headroom
+// has to exist before the menu opens: with a 10 MB reserve CAC peaked at
+// ~3 MB free (vanilla: ~6.5 MB), hence the 12 MB default. Slots as for
+// g_probe_cache.
 struct ProbeBudget {
   int allowance = 64;
   int admitted = 0;
