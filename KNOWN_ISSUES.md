@@ -201,15 +201,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Where:** `src/skate3_win_icon.cpp`
 - **Problem:** a failed swap leaves the `.icon-new` file in place.
 
-### KI-30: F12 dialog rewrites a cvar the render thread overrides
-
-- **Status:** open · **Severity:** low · was BT-23
-- **Where:** `src/skate3_native_debug_dialog.cpp`
-- **Problem:** `native_render_suppress_emulated_draws` is read and written back
-  every UI frame, which can clobber the render thread's temporary override
-  (see KI-11). Other sliders the render thread touches follow the same pattern.
-- **Fix:** only call `REXCVAR_SET` when the widget reports a change.
-
 ### KI-31: C++ tests not built, no CI
 
 - **Status:** open · **Severity:** low · was BT-24
@@ -1009,6 +1000,46 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-30: F12 dialog rewrites a cvar the render thread overrides
+
+- **Status:** fix in review (PR_PLACEHOLDER), tested unattended. Editing
+  controls in the dialog still needs an in-game test. · **Severity:** low ·
+  was BT-23
+- **Where:** `src/skate3_native_debug_dialog.cpp` (every section),
+  `SdkCvarOverride` in `src/skate3_native_scene_gpu.cpp`
+- **Cause:** almost every control was written as
+  `REXCVAR_SET(x, CvarCheckbox(..., REXCVAR_GET(x)))`, so each UI frame read
+  the cvar and wrote it straight back, edit or not. `REXCVAR_SET` is a plain
+  store, so a write by another thread that landed between the read and the
+  write-back was undone. For `native_render_suppress_emulated_draws` that
+  other writer is the render thread's `SdkCvarOverride` (KI-11). Undoing its
+  forced value left the menu or photo window running without the override,
+  because `Acquire` never writes again while held. Undoing its restore left the
+  forced value in place after the window closed. The same pattern raced the
+  options menu, the settings overlay, MAX QUALITY and the hotkeys on every
+  other cvar in the dialog. The F5 checkbox read the cvar twice, so an F5
+  press between the reads was toggled straight back.
+- **Fix:** `CvarCheckbox`, `CvarSlider` and `ValueCombo` take the cvar's
+  storage and write it only on the frame ImGui reports an edit. The sun
+  override and F5 checkboxes use the `Checkbox` return value too. The
+  controls that were already conditional (`SliderInt`, `Combo`, `InputInt`
+  and the explicit `SliderFloat`s) are unchanged. While an override holds the
+  suppress cvar, the dialog shows the user's value from the new
+  `SdkCvarOverride::HeldView` (an atomic mirror of the saved value, through
+  `native_scene::SuppressEmulatedDrawsOverride`), greys the box out and adds
+  an "(overridden)" note. `Release` now logs a warning if the forced value
+  was overwritten while held. MAX QUALITY's suspend and restore (KI-12) is
+  unchanged. New debug cvar `skate3_native_debug_open_at_boot` opens F12 at
+  startup for unattended runs.
+- **Tested:** three unattended demo-path boots with F12 open from startup and
+  `--skate3_native_render_scene_menu_unsuppress=true`, so the menu context
+  holds the suppress override. The boot menu ("portrait window - suppress
+  mode -> 3") and the pause menu showed the box ticked, greyed and
+  "(overridden)". After resuming ("leaving menu context - emulated draw
+  suppression restored") it was ticked and editable again. No "overwritten
+  while held" warning in any run. Clicks can't be injected, so control edits
+  and the F5 path ("SDK cvar overrides ... restored") were not exercised.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
