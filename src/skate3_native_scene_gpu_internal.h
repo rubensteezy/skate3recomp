@@ -975,7 +975,15 @@ struct RendererState {
   // zero) instead of the whole static item list. Reset on re-prime (clear).
   // Render thread only.
   std::unordered_set<uint64_t> world_shadow_drawn;
-  static constexpr uint32_t kUiRegionSize = 1u << 20;
+  // Per-frame vertex region shared by the in-world spline pass (first) and
+  // the HUD/2D pass. An Own the Lot boundary is up to 54 neon strips,
+  // ~1.03 MB on its own: with a 1 MB region it overflowed whenever the
+  // whole outline was in view, the spline pass took the region and every
+  // HUD draw after it was skipped (the event HUD popping in and out, KI-34).
+  // Splines stop at kUiSplineBudget so the HUD always keeps the last 1 MB,
+  // which is more than any HUD/menu frame has needed.
+  static constexpr uint32_t kUiRegionSize = 4u << 20;
+  static constexpr uint32_t kUiSplineBudget = kUiRegionSize - (1u << 20);
   static constexpr uint32_t kUiRegions = 8;
   nrhi::Buffer* ui_ring = nullptr;
   uint8_t* ui_ring_cpu = nullptr;

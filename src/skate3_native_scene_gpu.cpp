@@ -10889,6 +10889,18 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   const uint32_t ui_region =
       uint32_t(frame_number % RendererState::kUiRegions) * RendererState::kUiRegionSize;
   uint32_t ui_offset = 0;
+  // A skipped spline strip or HUD draw is a visible hole; name it in the log
+  // instead of dropping it silently (rolling-capped).
+  const auto log_ui_overflow = [&](const char* pass, uint32_t bytes) {
+    static std::atomic<uint32_t> s_overflow{0};
+    const uint32_t n = s_overflow.fetch_add(1, std::memory_order_relaxed);
+    if (n < 8 || (n & 4095u) == 0) {
+      REXLOG_WARN(
+          "native-scene: UI vertex region full, {} draw skipped ({} bytes, "
+          "{} of {} used) (n={})",
+          pass, bytes, ui_offset, RendererState::kUiRegionSize, n);
+    }
+  };
 
   // In-world neon splines (waypoint arrows / marker beams): replayed inside
   // the scene pass, depth-tested against the world like the emulated frame,
@@ -10903,7 +10915,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     for (const SplineDraw& s : scene_spline) {
       const uint32_t bytes = uint32_t(s.verts.size());
-      if (bytes == 0 || ui_offset + bytes > RendererState::kUiRegionSize) {
+      if (bytes == 0) {
+        continue;
+      }
+      // Capped below the full region so the HUD pass always has room.
+      if (ui_offset + bytes > RendererState::kUiSplineBudget) {
+        log_ui_overflow("spline", bytes);
         continue;
       }
       std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, s.verts.data(), bytes);
@@ -11912,6 +11929,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         }
         if (ui_offset + bytes > RendererState::kUiRegionSize) {
           g_draws_2d_dropped.fetch_add(1, std::memory_order_relaxed);
+          log_ui_overflow("2D", bytes);
           return;
         }
         std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, d.verts.data(), bytes);
