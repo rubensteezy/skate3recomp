@@ -598,8 +598,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-20: Depth-view caches compare textures by pointer
 
-- **Status:** fix in review, awaiting in-game test · **Severity:** low–medium
-  · was BT-13
+- **Status:** fix in review in rubensteezy/skate3recomp#32, awaiting
+  in-game test · **Severity:** low–medium · was BT-13
 - **Area:** native renderer, post effects
 - **Where:** the photo-postfx depth view `pfx_srv[7]` (`RenderScene`,
   `src/skate3_native_scene_gpu.cpp`), the SSAO, SSR and volumetric depth
