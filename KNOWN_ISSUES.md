@@ -645,8 +645,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-21: Occlusion culling silently inactive with SSAO off
 
-- **Status:** fix in review, awaiting in-game test · **Severity:** low–medium
-  · was BT-14
+- **Status:** fix in review in rubensteezy/skate3recomp#33, awaiting in-game
+  test · **Severity:** low–medium · was BT-14
 - **Area:** native renderer, performance. The emulated renderer (F5) has no
   occlusion cull, so it is not affected.
 - **Problem:** with Ambient Occlusion off, the occlusion cull never ran and
