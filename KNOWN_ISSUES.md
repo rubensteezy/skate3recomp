@@ -956,19 +956,82 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** keep unusable entries unchanged on save, or back the file up
   the first time anything is dropped.
 
-### KI-81: `path.string()` may throw on non-ASCII user paths
+### KI-81: Non-ASCII paths are mis-decoded, and `path.string()` may throw on them
 
-- **Status:** open (unverified) · **Severity:** low–medium
-- **Area:** SDK app startup, settings
-- **Tracking:** none yet. Found while fixing KI-59 (#45).
-- **Where:** rexglue-sdk `ReXApp::SetupEnvironment`, `ConfigFileContainsAnyKey`
-  and `SaveConfigValues`, which pass `path.string()` to `toml::parse_file`.
-- **Problem:** on Windows, `std::filesystem::path::string()` converts to the
-  ANSI code page and can throw for characters outside it. A user folder like
-  `C:\Users\Jiří` or one in a CJK script could make startup or settings saves
-  throw. #45's new code uses UTF-8 paths and avoids this.
-- **Next step:** test with a non-ASCII `--user_data_root`. If it throws, switch
-  those calls to `path.u8string()` or a wide-path open.
+- **Status:** open (mis-decoding confirmed; throwing unverified) ·
+  **Severity:** low–medium
+- **Area:** SDK app startup, settings, app logging
+- **Tracking:** none yet. Found while fixing KI-59 (#45); confirmed while
+  fixing KI-46 (#46).
+- **Problems:**
+  - **Mis-decoding (confirmed):** the SDK's path setup in `src/ui/rex_app.cpp`
+    assigns a UTF-8 `std::string` straight to `std::filesystem::path`
+    (`user_dir = user_data_cvar;`). Windows reads that as the ANSI code page.
+    The same pattern is used for `game_data_root`, `cache_root`,
+    `update_data_root` and the settings.toml path values. With
+    `--user_data_root=...\na_Jiří_日本` the game booted, but all user data
+    (cache, dlc, settings.toml) went into a mojibake folder
+    `na_JiÅ™Ã­_æ—¥æœ¬`, and the intended folder stayed empty. The log still
+    shows the right name.
+  - **Throwing (unverified):** `std::filesystem::path::string()` converts to the
+    ANSI code page and can throw for characters outside it. The SDK passes it
+    to `toml::parse_file` in `ReXApp::SetupEnvironment`,
+    `ConfigFileContainsAnyKey` and `SaveConfigValues`. The game's own `src/`
+    has 52 more `.string()` calls across 9 files, many in log lines on user
+    paths: the DLC scan, "Skate 3 saves: using portable folder", and
+    `content_root.string()` in `InstallRecipeOverlay`. These are reachable
+    through the default AppData path (a non-ASCII Windows username) or a
+    portable install folder, so they could crash startup for those users.
+- **Next step:** in the SDK, build these paths with `rex::to_path(utf8)` and
+  replace `.string()` with UTF-8 conversion (SDK-fork PR plus an "sdk: bump"
+  commit). In the game, sweep `src/` to `rex::path_to_utf8`. Then test with a
+  portable install in a non-ASCII folder.
+
+### KI-82: Persistent shader storage is disabled on long user-data paths
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK D3D12 pipeline cache
+- **Tracking:** none yet. Found while fixing KI-46 (#46).
+- **Where:** `InitializeShaderStorage` in rexglue-sdk
+  `src/graphics/d3d12/pipeline_cache.cpp`.
+- **Problem:** with a 218-character user-data root, it logged "Failed to open
+  the Direct3D 12 pipeline description storage file for writing, persistent
+  shader storage will be disabled". The storage file path was about
+  290 characters. The game runs, but shaders recompile on every boot. Vulkan
+  wasn't checked.
+- **Next step:** use `\\?\` paths for the cache root in the SDK, the way #46
+  does for the overlay. Adding `longPathAware` to `src/skate3_app.manifest`
+  only helps where the LongPathsEnabled policy is set.
+
+### KI-83: Saves may fail on long user-data paths
+
+- **Status:** open (code reading only) · **Severity:** low–medium
+- **Area:** SDK content, saves
+- **Tracking:** none yet. Found while fixing KI-46 (#46).
+- **Where:** `ContentManager::ResolvePackagePath` builds
+  `<root>\<xuid 16>\<title 8>\<type 8>\<name>\...` with plain paths, and
+  `HostPathEntry::CreateEntryInternal` and the file opens use no `\\?\`
+  prefix.
+- **Problem:** a long AppData or portable path would hit MAX_PATH at a slightly
+  shorter root than the overlay did, so career saves could fail to write.
+- **Next step:** give content roots the same `\\?\` treatment in the SDK, then
+  run a save test on a long root.
+
+### KI-84: MAX_PATH buffers truncate long exe and file-dialog paths
+
+- **Status:** open (code reading only) · **Severity:** low
+- **Area:** app, installers
+- **Tracking:** none yet. Found while fixing KI-46 (#46). See also KI-73.
+- **Where:**
+  - `Skate3BaseApp::RestartGame` (`src/skate3_app_common.cpp`):
+    `GetModuleFileNameW` with a MAX_PATH buffer. On truncation it doesn't
+    return 0, so `CreateProcessW` gets a cut path, the restart fails, and the
+    log is misleading.
+  - `PickIsoFile` (`src/skate3_iso_installer.cpp`) and `PickTitleUpdateFile`
+    (`src/skate3_title_update_installer.cpp`): MAX_PATH file-dialog buffers,
+    so picking a file deeper than 260 characters fails.
+- **Fix:** use the SDK's `rex::filesystem::GetExecutablePath()`, which already
+  handles long paths, and bigger dialog buffers.
 
 ## Resolved
 
