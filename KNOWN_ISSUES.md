@@ -278,6 +278,60 @@ repro steps; the entry says where the problem is and how it would show.
   records the 2D draws with their inline vertex data. Decode the 32-byte
   vertices, compare with F5, then add the layout to `Publish2dDraws`.
 
+### KI-38: Frames-in-flight limit may skip frames only the native renderer draws
+
+- **Status:** open (unconfirmed) · **Severity:** low–medium
+- **Area:** SDK command processor, frame pacing
+- **Tracking:** none yet. Found while fixing KI-16 (#28).
+- **Where:** rexglue-sdk `src/graphics/d3d12/command_processor.cpp`,
+  `EndSubmission`. It sets `is_closing_frame = is_swap && frame_open_`, and
+  only a closed frame enters the `kQueueFrames` = 3 wait in
+  `BeginSubmission`. The Vulkan command processor has the same pattern with
+  `kMaxFramesInFlight` = 3.
+- **Problem:** if the native frame's `EndSubmission(true)` runs with no frame
+  open (for example with guest draws suppressed), nothing limits how far the
+  GPU falls behind. Input latency would grow and the upload rings would run
+  out of free regions. The #28 log line "upload ring <name>: all N regions in
+  flight" would then appear.
+- **Evidence:** the code path only, not checked at runtime. The bone-ring
+  comment in `skate3_native_scene_gpu_internal.h` records the Vulkan GPU
+  running more than 3 frames behind, which would fit.
+- **Next step:** log `frame_open_` at the native `EndSubmission(true)` on both
+  backends during gameplay. If it is false, open the frame in
+  `NativeRhiBeginFrame`.
+
+### KI-39: The native RHI has no way to wait on a GPU submission
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK native RHI
+- **Tracking:** none yet. Found while fixing KI-16 (#28).
+- **Where:** rexglue-sdk `include/rex/graphics/native_rhi.h`. `nrhi::Device`
+  has `CurrentSubmission()` and `CompletedSubmission()` but nothing that
+  blocks.
+- **Problem:** game code can't wait for the GPU. `CompletedSubmission()` is a
+  cached value the command processor refreshes in `BeginSubmission`, so
+  spinning on it on the render thread never advances. #28 therefore reuses
+  the oldest region and logs, instead of waiting.
+- **Next step:** add `Device::WaitForSubmission(uint64_t)`, backed by
+  `CheckSubmissionFence` / `CheckSubmissionFenceAndDeviceLoss`. That needs an
+  SDK-fork PR plus an "sdk: bump" commit. `UploadRingRegions::Acquire` can
+  then wait, with a rate-limited log, instead of racing.
+
+### KI-40: Photo FX constant slots have no bounds check
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, photo FX
+- **Tracking:** none yet. Found while fixing KI-16 (#28).
+- **Where:** `src/skate3_native_scene_gpu.cpp`, `RenderScene`, the photo FX
+  `fill_cb` lambda.
+- **Problem:** `cb_slot_next++` is never checked against
+  `RendererState::kPfxCbSlots` (10). Today at most 10 slots are used: depth
+  pack, accum feed, 6 passes, accum mode 2 and the debug view. One more pass
+  would silently write into the next frame's region, or past the end of the
+  buffer for the last region.
+- **Fix:** clamp it, or assert and log when `cb_slot_next` reaches
+  `kPfxCbSlots`.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
