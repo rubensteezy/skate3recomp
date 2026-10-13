@@ -1003,7 +1003,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-30: F12 dialog rewrites a cvar the render thread overrides
 
-- **Status:** fix in review (PR_PLACEHOLDER), tested unattended. Editing
+- **Status:** fix in review (rubensteezy/skate3recomp#42), tested unattended. Editing
   controls in the dialog still needs an in-game test. · **Severity:** low ·
   was BT-23
 - **Where:** `src/skate3_native_debug_dialog.cpp` (every section),
