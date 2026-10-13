@@ -644,6 +644,49 @@ repro steps; the entry says where the problem is and how it would show.
   the cut, so in practice only hand-edited names hit it.
 - **Fix:** truncate at a UTF-8 character boundary.
 
+### KI-61: Palette scoring rejects samples at the edges of very wide views
+
+- **Status:** open (unconfirmed) · **Severity:** low–medium
+- **Area:** native renderer, ultrawide, skinned characters and vehicles
+- **Tracking:** none yet. Found while fixing KI-25 (#37).
+- **Where:** `RefinePaletteBase` (the `score` lambda) and `ScoreRigidAffine`
+  in `src/skate3_native_scene.cpp`.
+- **Problem:** both accept a sample only if it projects within 1.5x of the
+  guest bank's own 16:9 clip volume. The ultrawide view reaches
+  |x|/w = 1/scale, which is 1.31 at 21:9 (fine) but 2.0 at 32:9. From about
+  2.4:1 up, skinned characters or vehicles near the side edges may fail
+  palette validation and render mangled or fall back.
+- **Next step:** pass the Hor+ scale into the x band, or widen it to
+  `1.5f / hor_scale`, then test at 32:9.
+
+### KI-62: Vehicle retention box may not track the car's real position
+
+- **Status:** open (unconfirmed) · **Severity:** low
+- **Area:** native renderer, vehicles
+- **Tracking:** none yet. Found while fixing KI-25 (#37).
+- **Where:** vehicle retention in `BuildFrameScene` (`src/skate3_native_scene.cpp`),
+  the `bone_center` / `DynRetained::half` box.
+- **Evidence:** in two unattended runs, 7,052 (D3D12) and 16,649 (Vulkan) live,
+  non-caster vehicle captures had a box entirely outside even the wide guest
+  frustum. Either the game submits cars for other perspective passes (such as
+  reflections), or the averaged bone position plus the bind-pose bbox diagonal
+  isn't a reliable proxy. If it's the proxy, every retention decision for
+  vehicles is less reliable than it looks.
+- **Next step:** log which plane rejects these boxes and their `dbg_src`.
+
+### KI-63: Traffic may despawn by 16:9 visibility on ultrawide
+
+- **Status:** open (unconfirmed guess) · **Severity:** low
+- **Area:** ultrawide, game logic
+- **Tracking:** none yet. Raised while fixing KI-25 (#37).
+- **Problem:** only the cull block's left and right planes are widened for
+  ultrawide. If the game's traffic despawn or "out of view" logic uses its own
+  16:9 visibility, cars could despawn while visible in the side bands.
+  Retention can't hide that, since it covers only 10 frames.
+- **Next step:** only if edge popping is still seen after #37: find the
+  traffic despawn visibility check in the recompiled code and see which
+  frustum it uses.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
