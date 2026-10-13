@@ -316,6 +316,9 @@ repro steps; the entry says where the problem is and how it would show.
   `CheckSubmissionFence` / `CheckSubmissionFenceAndDeviceLoss`. That needs an
   SDK-fork PR plus an "sdk: bump" commit. `UploadRingRegions::Acquire` can
   then wait, with a rate-limited log, instead of racing.
+- **Lower priority (from KI-38, #49):** frames in flight never exceed 3 on
+  either backend, even when GPU-bound. With #28's 8 regions, the fallback
+  that would need this wait can't trigger in normal operation.
 
 ### KI-40: Photo FX constant slots have no bounds check
 
@@ -1117,6 +1120,37 @@ repro steps; the entry says where the problem is and how it would show.
   the page has been reused.
 - **Next step:** low priority. Check `inst_a` / `inst_b` against a guarded read
   of their vtable or type before the stores.
+
+### KI-90: The bone-ring comment blames the wrong cause for hair shimmer
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, characters
+- **Tracking:** none yet. Found while checking KI-38 (#49).
+- **Where:** the `RendererState::kBoneRegions` comment in
+  `src/skate3_native_scene_gpu_internal.h`.
+- **Problem:** it blames hair shimmer and collapsed garments on the Vulkan GPU
+  running more than 3 frames behind, which is why the ring is 8 deep. #49
+  measured that frames never go past 3 on either backend. Submissions do:
+  Vulkan reached 6 in flight while loading, because there are several per
+  frame. A ring keyed by frame number with 4 or more regions is never reused
+  while the GPU still reads it, so that corruption had another cause.
+- **Also:** #28's "K/N regions in flight" and "all N regions in flight" upload
+  ring lines can't fire in normal operation for the same reason. Consider
+  lowering their threshold to "more than 3".
+- **Next step:** if the shimmer comes back, look for a `RenderScene` that runs
+  more than once per `g_frames_rendered` value, or at the ROPA generation
+  ring. Then fix the comment.
+
+### KI-91: Frame rate is uncapped by default
+
+- **Status:** open (decision) · **Severity:** low
+- **Area:** settings defaults
+- **Tracking:** none yet. Noticed while checking KI-38 (#49).
+- **Problem:** the SDK `vsync` cvar defaults to false, and at default settings
+  both backends ran at about 4.4 ms per frame (about 225 fps). That may cost
+  power and heat for no benefit, especially on laptops.
+- **Next step:** decide whether release defaults should turn on vsync or a
+  frame cap. Settings > Display already has Framerate Cap and V-Sync rows.
 
 ## Resolved
 
