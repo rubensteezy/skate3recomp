@@ -227,15 +227,6 @@ repro steps; the entry says where the problem is and how it would show.
   - The `kSceneRingFrames` comment says about 900, but the value is 2400.
   - The header declaring `MaybeDumpSceneRing` is missing includes.
 
-### KI-33: Hook addresses not gated on Title Update 3
-
-- **Status:** open (unconfirmed) · **Severity:** medium if confirmed · was BT-26
-- **Area:** hooks
-- **Problem:** the demo-path and native hook addresses aren't conditioned on
-  `SKATE3_HAS_TITLE_UPDATE`. If any differ between the base XEX and TU3, the
-  hook lands on the wrong function in one of the two builds.
-- **Next step:** diff the hooked addresses between the base and TU3 codegen.
-
 ### KI-35: Team-member portraits in character creation show old photos
 
 - **Status:** investigating
@@ -434,6 +425,41 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-33: Hook addresses not gated on Title Update 3
+
+- **Status:** fixed in rubensteezy/skate3recomp#PRNUM · was BT-26
+- **Problem:** the game hooks use hard-coded guest addresses that are only
+  correct in the Title Update 3 image, but the build still allowed codegen
+  from the unpatched retail image. Release builds were never affected: they
+  always use TU3.
+- **Checked:** base-XEX codegen (retail `default.xex`,
+  `config/skate3_functions.toml`) against the TU3 `generated/`, comparing each
+  function's instruction stream with branch targets masked. TU3 shifts most
+  code by about 0x24000 to 0x2B000 (for example the front-end state setter is
+  `0x82CDFFB8` in retail, `0x82D0AFA0` in TU3). `src/` hooks or calls 90
+  TU3 function addresses. 88 are not function starts in retail. The other
+  two, `sub_82782818` and `sub_82B78FF0`, are different functions there,
+  which is the silent wrong-hook case. The options menu, heap diagnostics and
+  exception guard were already gated. The other 61 addresses were not: the
+  native renderer, scene, draw-distance and demo-path hooks. Guest data
+  addresses (globals, vtables) were not diffed. They sit behind the same
+  gate now.
+  The demo-path intro-movie codegen patch (`ApplySkate3CodegenPatches.cmake`)
+  also anchors on TU3 addresses. The ultrawide frustum and FOV patches match
+  instruction patterns instead.
+- **Effect:** a retail build failed to link with
+  `undefined reference to __imp__sub_...`, because each hook calls the
+  original through a symbol the retail codegen doesn't emit. A reconfigure
+  that lost the game root (and with it the TU3 fallback) produced the same
+  error.
+- **Fix:** configure now stops with an error that says how to provide TU3
+  when no TU3 codegen input is found. A `static_assert` on
+  `SKATE3_HAS_TITLE_UPDATE` at the top of each ungated hook block marks the
+  addresses as TU3-only.
+- **Leftover:** the retail-only branches (`#if !SKATE3_HAS_TITLE_UPDATE` in
+  `src/skate3_app_common.cpp` and `src/exception_compat.cpp`, the
+  retail `config/skate3_functions.toml`) are now unreachable.
 
 ### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
 

@@ -379,6 +379,10 @@ void Install() {
 
 }  // namespace skate3::native_render
 
+// The guest addresses hooked below are Title Update 3 (3.0.3.0) image
+// addresses; the retail image has other code there (KI-33).
+static_assert(SKATE3_HAS_TITLE_UPDATE, "hooks target Title Update 3 addresses");
+
 // "RenderMesh" per-visible-mesh submission for dynamic entities (characters,
 // props). Actual convention (verified via recompiled code + snapshot):
 // r3 = MeshContext*, r4 = renderengine::VertexProgramState*.

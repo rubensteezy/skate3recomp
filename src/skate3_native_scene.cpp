@@ -10980,6 +10980,10 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
 
 }  // namespace skate3::native_scene
 
+// The guest addresses hooked below are Title Update 3 (3.0.3.0) image
+// addresses; the retail image has other code there (KI-33).
+static_assert(SKATE3_HAS_TITLE_UPDATE, "hooks target Title Update 3 addresses");
+
 // Sk8::Render::ViewCamera::SetViewMatrix(const rw::math::Matrix44&): the
 // game passes each frame's freshly computed view matrix here and derives
 // the stored view (+0x20), its transpose (+0xE0), the view-proj (+0xA0) and

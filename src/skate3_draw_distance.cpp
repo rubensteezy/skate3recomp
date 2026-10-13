@@ -376,6 +376,10 @@ void MaybePollDebugMarkerKey() {
 
 }  // namespace
 
+// The guest addresses hooked below are Title Update 3 (3.0.3.0) image
+// addresses; the retail image has other code there (KI-33).
+static_assert(SKATE3_HAS_TITLE_UPDATE, "hooks target Title Update 3 addresses");
+
 // Sk8 cull-parameter setter: [cullObject+6060] = flags, [cullObject+6064] =
 // contribution-cull threshold (float). Record the game's value and apply the
 // configured scale.
