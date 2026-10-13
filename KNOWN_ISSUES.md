@@ -1033,6 +1033,37 @@ repro steps; the entry says where the problem is and how it would show.
 - **Fix:** use the SDK's `rex::filesystem::GetExecutablePath()`, which already
   handles long paths, and bigger dialog buffers.
 
+### KI-85: Dropping a speculative prewarm entry clears a live miss's in-flight key
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming
+- **Tracking:** none yet. Found while fixing KI-65 (#47).
+- **Where:** the `if (dropped)` branch of `ProcessPrewarmEntry` in
+  `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** it calls `g_miss_inflight_mesh.erase(e.mesh)` without checking
+  `e.miss`. When a speculative entry for mesh X is dropped while a miss for X
+  is still in flight, the miss's key is cleared, and the draw path can queue
+  a second decode of X. That wastes worker time but has no visual effect.
+- **Fix:** erase only when `e.miss` is set.
+
+### KI-86: The prewarm miss queue pops from the front of a vector
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming performance
+- **Tracking:** none yet. Found while fixing KI-65 (#47).
+- **Where:** `PrewarmWorkerLoop` in `src/skate3_native_scene_gpu.cpp`, and
+  `skate3_native_scene_state.h`.
+- **Problem:** `g_miss_queue.erase(g_miss_queue.begin())` costs time in
+  proportion to the queue length (capped at 65536) while `g_prewarm_mutex` is
+  held, so a large streaming burst could stall the workers. `g_dyn_jobs` has
+  the same pattern.
+- **Also:** the null base/device re-queue in `PrewarmWorkerLoop` is close to
+  dead code (the workers start only once `g_r.device` is set, and nothing
+  resets it). It never decrements retries, so if it ever ran for long it
+  would spin entries every 100 ms per worker without end.
+- **Next step:** switch both queues to `std::deque` if a profile shows lock
+  contention. Turn the null re-queue into a plain wait.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
