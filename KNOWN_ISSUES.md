@@ -1255,7 +1255,7 @@ repro steps; the entry says where the problem is and how it would show.
 ### KI-65: Prewarm retries lost the visible-miss priority
 
 - **Status:** fix in review, tested unattended. Awaiting an in-game test.
-- **Tracking:** rubensteezy/skate3recomp#PRNUM. Found while fixing KI-26 (#38).
+- **Tracking:** rubensteezy/skate3recomp#47. Found while fixing KI-26 (#38).
 - **Problem:** a mesh the player can see (a draw-path miss) whose first build
   failed waited behind the speculative prewarm backlog and the per-frame
   commit cap, which shows as longer pop-in or white surfaces while streaming.
@@ -1289,7 +1289,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 - **Status:** fix in review, tested unattended (same change as KI-65). The
   reported kind loss was not real.
-- **Tracking:** rubensteezy/skate3recomp#PRNUM. Found while fixing KI-26 (#38).
+- **Tracking:** rubensteezy/skate3recomp#47. Found while fixing KI-26 (#38).
 - **Problem as reported:** when `base` or `g_r.device` is still null,
   `PrewarmWorkerLoop` re-queues the entry with `g_prewarm_retry.push_back(e)`,
   and `PrewarmCommit` was thought to lose its kind, so texture-only and cube
