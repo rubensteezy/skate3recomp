@@ -143,14 +143,6 @@ repro steps; the entry says where the problem is and how it would show.
   With SSAO off, the grid expires after 240 frames and the occlusion cull
   stays off without any message.
 
-### KI-22: Shadow-dump readback buffers not resized (debug only)
-
-- **Status:** open · **Severity:** low–medium · was BT-15
-- **Area:** native renderer, diagnostics
-- **Where:** `src/skate3_native_scene_gpu.cpp`
-- **Problem:** the shadow-dump readback buffers keep their first size after a
-  shadow tile change, so a later recording copies out of bounds on the GPU.
-
 ### KI-23: OnShutdown misses several UnregisterBind calls
 
 - **Status:** open · **Severity:** low · was BT-16
@@ -1352,6 +1344,37 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-22: Shadow-dump readback buffers not resized (debug only)
+
+- **Status:** fix in review, tested unattended (D3D12 debug layer and Vulkan) · was BT-15
+- **Area:** native renderer, diagnostics
+- **Problem:** the shadow-dump readback buffers keep their first size after a
+  shadow tile change, so a later recording copies out of bounds on the GPU.
+- **Cause:** `RenderShadowAtlas` (`src/skate3_native_scene_gpu.cpp`) created
+  the four per-frame readback buffers once, sized for the tile in use at the
+  first capture recording, and reused them for every later recording. The
+  atlas is recreated live when the tile changes
+  (`skate3_native_render_scene_shadow_tile`, auto mode, F12 MAX QUALITY), so
+  a larger tile copied past the end of the old buffers. The write-out also
+  read `g_r.shadow_tile` at write time, not the tile the copy was taken at,
+  so a tile change between copy and write-out read past the mapped buffer
+  on the CPU. A tile that isn't a multiple of 64 also gave a row pitch that
+  is not 256-aligned, which D3D12 rejects.
+- **Fix:** each buffer records the tile it was sized for
+  (`RendererState::shadow_dump_tile`). On a mismatch the old buffer is
+  retired with `DestroyDeferred`, like the atlas textures, and recreated at
+  the new size. The write-out uses the slot's own tile. `ShadowDumpLayoutFor`
+  pads the row pitch to 256 bytes and the plane offset to 512 bytes, and the
+  write-out strips the padding, so the `.bin` files stay tightly packed.
+- **Tested:** unattended demo-path boots on D3D12 (debug layer on) and
+  Vulkan, with a local-only hook setting the tile cvar live between
+  trigger-file recordings: 512, 1024, 600, 512, 2048. Every recording wrote
+  its dumps at the new size, with the expected byte count and an unsheared
+  image for 600, and the debug layer reported no copy errors. The same
+  sequence on the old code hit `COPYTEXTUREREGION_INVALIDDSTPLACEMENT` on the
+  first dump after 512 -> 1024, then device removal and a crash. The Vulkan
+  validation layer is not installed on the test machine.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
