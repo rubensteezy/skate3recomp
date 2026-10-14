@@ -433,7 +433,7 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-41: Shadow-pass textures could be evicted while still in use
 
-- **Status:** fix in review (stacked on #29) · **Severity:** low–medium
+- **Status:** fix in review in rubensteezy/skate3recomp#51 (stacked on #29) · **Severity:** low–medium
 - **Area:** native renderer, shadows, texture cache
 - **Where:** `LookupResolvedTexture` in `src/skate3_native_scene_gpu.cpp`.
   `RenderShadowAtlas` calls it for alpha-clip casters (`item.dynobj == 2`) and
