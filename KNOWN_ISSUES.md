@@ -431,6 +431,35 @@ repro steps; the entry says where the problem is and how it would show.
   something was pruned. The perf log line (`skate3_native_render_scene_perf_log`)
   shows the sizes in `store[...]` too.
 
+### KI-41: Shadow-pass textures could be evicted while still in use
+
+- **Status:** fix in review in rubensteezy/skate3recomp#51 (stacked on #29) · **Severity:** low–medium
+- **Area:** native renderer, shadows, texture cache
+- **Where:** `LookupResolvedTexture` in `src/skate3_native_scene_gpu.cpp`.
+  `RenderShadowAtlas` calls it for alpha-clip casters (`item.dynobj == 2`) and
+  `RenderStaticSunMap` (experimental since KI-5) for phase-1
+  `rec.diffuse_tex`.
+- **Problem:** the lookup stamped the route but not the `tex_store` entry.
+  `EvictTexStore` picks candidates by `last_used_frame` alone, with a 5 s idle
+  guard under byte pressure. A texture that only the shadow passes sample (a
+  caster the main pass occlusion-culls or does not draw) looked idle and was
+  evicted. The caster passes never enqueue a decode, so it stayed gone and the
+  alpha-tested caster cast a solid shape until the main pass drew the item
+  again.
+- **Evidence:** reproduced with temporary counters (not committed) in the
+  lookup, on unattended `--skate3_demo_path=true` boots in the plaza spawn
+  with `--skate3_native_render_scene_experimental_static_shadows=true` and a
+  64 MB store budget (the debug build lowered the 256 MB floor). Over about
+  33,000 frames, shadow lookups of a key the shadow pass had sampled before but
+  that was no longer in the store: 228 of 9,588 on D3D12 and 229 of 9,588 on
+  Vulkan. With the stamp: 0 on both. The store held the same size (about
+  430 entries, 65 MB) either way. In this spawn, every lookup came from the
+  static sun map: no `dynobj == 2` casters were in view, so the default
+  settings did not hit it there. The evicted caster was off-screen, so the
+  screenshots showed no visible change.
+- **Fix:** `LookupResolvedTexture` also sets the store entry's
+  `last_used_frame` to the current frame. Both callers go through it.
+
 ### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
 
 - **Status:** fixed in rubensteezy/skate3recomp#25. Confirmed in-game on
