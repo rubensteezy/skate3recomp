@@ -525,6 +525,9 @@ repro steps; the entry says where the problem is and how it would show.
 - **Likely cause (from KI-28, #40):** in the current build, LB, LT and RT don't
   change pause-menu tabs; d-pad left/right does. The help text's map-switch
   example uses `rt` for tabs.
+- **Seen again (KI-41, #51):** with the documented string
+  `start,a,rt:1500,rt:1500,down,down,a,down,down,down,down,down,a,a`, the skater
+  stayed in the plaza, standing off the board, and no map change happened.
 - **Next step:** update the example to use d-pad left/right, check that it
   reaches a map change (signed in, if that's needed), and fix the help text.
 
@@ -1191,6 +1194,40 @@ repro steps; the entry says where the problem is and how it would show.
   can't pan the camera or put characters at the screen edges on purpose.
   That limited the testing of KI-25 (#37) and KI-61 (#50).
 - **Fix:** add stick tokens, for example `rs_left:ms` and `ls_up:ms`.
+
+### KI-95: Shadow-atlas casters don't stamp their mesh entries
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** native renderer, shadows, mesh cache
+- **Tracking:** none yet. Found while fixing KI-41 (#51). The same kind of bug
+  as KI-41, for meshes.
+- **Where:** the caster loop of `RenderShadowAtlas` in
+  `src/skate3_native_scene_gpu.cpp`. It checks `g_r.meshes.contains(item.mesh)`
+  and later does `g_r.meshes.find(...)`, but never sets the mesh's
+  `last_used_frame`. `RenderStaticSunMap` does
+  (`mit->second.last_used_frame = frame_number`).
+- **Problem:** under mesh-store pressure
+  (`skate3_native_render_scene_mesh_store_mb`), the mesh of a caster the main
+  pass doesn't draw can be evicted. The caster then silently drops out of the
+  shadow, because the pass `continue`s on a missing mesh.
+- **Evidence:** a temporary counter found 5,995 to 25,377 caster-frames per
+  150 s run whose mesh hadn't been stamped for more than 5 s. No mesh was
+  actually skipped, because the 1024 MB mesh budget was never under pressure.
+- **Fix:** stamp `mit->second.last_used_frame` in the atlas loop, then test with
+  a small mesh budget.
+
+### KI-96: The texture store budget can't go below 256 MB for testing
+
+- **Status:** open · **Severity:** low
+- **Area:** test tooling
+- **Tracking:** none yet. Found while fixing KI-41 (#51).
+- **Where:** the `.range(256, 16384)` on `skate3_native_render_scene_tex_store_mb`
+  in `src/skate3_native_scene.cpp`, and `std::max(256, …)` in `EvictTexStore`.
+- **Problem:** the floor is enforced twice. A light area's working set is
+  about 225 MB, so at 256 MB the LRU never starts, and reproducing store
+  pressure there needs a code change.
+- **Next step:** if testing at low budgets matters, lower the floor for dev
+  builds or add a debug cvar.
 
 ## Resolved
 
