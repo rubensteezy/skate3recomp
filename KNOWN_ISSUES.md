@@ -1152,6 +1152,46 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** decide whether release defaults should turn on vsync or a
   frame cap. Settings > Display already has Framerate Cap and V-Sync rows.
 
+### KI-92: `ScoreRigidAffine` has no in-front-of-camera check
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, player garments
+- **Tracking:** none yet. Found while fixing KI-61 (#50).
+- **Where:** `ScoreRigidAffine` in `src/skate3_native_scene.cpp`.
+- **Problem:** its strict count accepts a sample when `|x|` and `|y|` are within
+  1.5·|w|, without requiring `clip[3] > 0`. So a matrix that places the
+  garment behind the camera can still score well. `RefinePaletteBase` has
+  that check, and its comment explains it exists for exactly this case. The
+  structural tail-row check on the matrix block reduces the risk.
+- **Fix:** add `clip[3] > 0.0f` to the strict count, then re-test the player's
+  tee (Ropa, sim active) up close.
+
+### KI-93: Character shadows may be cut off at the edges on 32:9 ultrawide
+
+- **Status:** open (unverified) · **Severity:** low–medium
+- **Area:** ultrawide, shadows
+- **Tracking:** none yet. Raised while fixing KI-61 (#50).
+- **Problem:** at 32:9, the game's sun-shadow bank puts characters in the side
+  bands at |x|/w up to about 2.0; at 16:9 that never passes 1.5. So the
+  game's shadow projection seems to be fitted to the 16:9 view only, and
+  shadows of characters or cars near the far edges may be missing or cut
+  off.
+- **Next step:** at 32:9, compare character and car shadows at the far edges
+  with the centre. If they're missing, check which projection the native
+  shadow atlas uses, and whether it can be widened the way the cull frustum
+  is.
+
+### KI-94: Demo-path inputs can't move the camera
+
+- **Status:** open · **Severity:** low
+- **Area:** test tooling
+- **Tracking:** none yet. Found while testing KI-61 (#50).
+- **Where:** `skate3_demo_path_gameplay_inputs` in `src/skate3_demo_path.cpp`.
+- **Problem:** it only takes button tokens, no sticks, so unattended runs
+  can't pan the camera or put characters at the screen edges on purpose.
+  That limited the testing of KI-25 (#37) and KI-61 (#50).
+- **Fix:** add stick tokens, for example `rs_left:ms` and `ls_up:ms`.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
