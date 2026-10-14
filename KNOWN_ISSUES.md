@@ -158,13 +158,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Problem:** the screenshot bind (which captures `this`), the F5 toggle,
   showcase and freecam binds are never unregistered on shutdown.
 
-### KI-24: XUID parsing and TOML escaping in user settings
-
-- **Status:** open · **Severity:** low · was BT-17
-- **Where:** `src/skate3_user_settings.cpp`
-- **Problem:** `ParseXuidString` tries hex first, so it misreads decimal
-  XUIDs. `TomlString` doesn't escape control characters.
-
 ### KI-25: Vehicle retention frustum test ignores the ultrawide scale
 
 - **Status:** open · **Severity:** low · was BT-18
@@ -1352,6 +1345,51 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-24: XUID parsing and TOML escaping in user settings
+
+- **Status:** fix in review in rubensteezy/skate3recomp#36, tested
+  unattended · **Severity:** low · was BT-17
+- **Where:** `ParseXuidString` and `TomlString` in
+  `src/skate3_user_settings.cpp` (reader and writer of `profiles.toml`)
+- **Problem:** `ParseXuidString` tried hex first and only fell back to
+  decimal when that failed, so any decimal XUID string of up to 16 digits
+  was read as hex (`"12345"` became `0x12345`, a different profile identity
+  and a different `saves/<xuid>` folder). Decimal strings of 17 to 20 digits
+  happened to work because they overflow as hex. `TomlString` only escaped
+  `"` and `\`, so a gamertag with a control character (tab, newline, U+0001)
+  was written raw. TOML forbids that, toml++ rejects the whole file, and
+  `LoadProfiles` then returns an empty store: every profile is lost and the
+  next save replaces the file with a default one.
+- **Fix:** `ParseXuidString` reads a `0x` prefix or exactly 16 hex digits as
+  hex, an all-digit string of any other length as decimal, and a shorter hex
+  string that contains a letter as hex. Anything else (signs, junk, overflow)
+  is 0. The one ambiguous case, 16 decimal digits, reads as hex because that
+  is what `FormatXuid` (the only writer: 16 zero-padded uppercase hex digits)
+  produces, so every file the game wrote reads back the same. A 16-digit
+  decimal XUID has to be written as a TOML integer, which `LoadProfiles`
+  already accepts. `TomlString` now escapes per the TOML spec: `\b \t \n \f
+  \r \" \\`, and `\uXXXX` for the other U+0000-U+001F characters and U+007F.
+  The reader is toml++, which decodes all of these.
+- **Tests:** a standalone check (compiles `skate3_user_settings.cpp` with a
+  stub `rex/cvar.h` against the SDK's toml++) covers the parsing rules,
+  100,000 `FormatXuid` round trips, toml++ decoding every byte 0x00-0x7F,
+  and a `LoadProfiles` / `SaveProfiles` / `LoadProfiles` round trip of a
+  file with decimal, hex, `0x` and integer XUIDs and a control-character
+  gamertag, with byte-identical saves. In the relwithdebinfo build, a boot
+  with a crafted `profiles.toml` (selected profile `xuid = "12345"`,
+  gamertag `"Dec\u0001Tag"`, plus a hex profile with a tab) loaded it and
+  the signed-in demo path created its save under `0000000000003039`
+  (12345); the old parser would have used `0000000000012345`. A boot with
+  no `profiles.toml` wrote the default profile, and the next boot read it
+  back unchanged and saved under that XUID.
+- **Not tested in the game:** saving from the profile page of the settings
+  dialog, which needs a person at the controls. It calls the same
+  `SaveProfiles` as the tests.
+- **Not covered:** the SDK's own copy of the parser,
+  `ParseXuid` in `third_party/rexglue-sdk/src/system/xam/user_profile.cpp`,
+  still tries hex first. It only sees `FormatXuid` output from the game, so
+  it is only wrong for a decimal `--user_profile_xuid=` passed by hand.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
