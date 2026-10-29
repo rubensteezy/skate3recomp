@@ -153,6 +153,10 @@ void PollF10Marker() {
 #endif
 }
 
+// The guest addresses hooked below are Title Update 3 (3.0.3.0) image
+// addresses; the retail image has other code there (KI-33).
+static_assert(SKATE3_HAS_TITLE_UPDATE, "hooks target Title Update 3 addresses");
+
 extern "C" REX_FUNC(Skate3DemoPath_SetFrontEndStateHook) {
   const uint32_t manager = ctx.r3.u32;
   const uint32_t state_id = ctx.r4.u32;

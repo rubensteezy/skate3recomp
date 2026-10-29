@@ -23,6 +23,23 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Standalone C++ unit tests (tests/CMakeLists.txt). They only need the C++
+# standard library. SKATE3_TESTS_ONLY configures nothing else, so the tests
+# build without the SDK submodule, game data, the title update or codegen
+# output (this is what CI uses).
+option(SKATE3_BUILD_TESTS "Build the standalone C++ unit tests and register them with CTest" OFF)
+option(SKATE3_TESTS_ONLY
+    "Configure only the standalone C++ unit tests (no SDK, game data or codegen needed)"
+    OFF)
+if(SKATE3_BUILD_TESTS OR SKATE3_TESTS_ONLY)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+if(SKATE3_TESTS_ONLY)
+    message(STATUS "SKATE3_TESTS_ONLY is on: configuring the unit tests only, not the game")
+    return()
+endif()
+
 include(cmake/Skate3Version.cmake)
 
 skate3_resolve_version(SKATE3_FULL_VERSION
@@ -179,12 +196,26 @@ if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "" AND
     else()
         message(WARNING
             "The game root holds xexp files that are not the TU3 payloads; "
-            "ignoring them and generating from the unpatched retail image.")
+            "ignoring them.")
     endif()
 endif()
 set(SKATE3_HAS_TITLE_UPDATE_CODEGEN OFF)
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "" OR SKATE3_TITLE_UPDATE_FROM_GAME_ROOT)
     set(SKATE3_HAS_TITLE_UPDATE_CODEGEN ON)
+endif()
+
+# The game hooks (native renderer, draw distance, demo path, options menu,
+# heap diagnostics) are written against Title Update 3 guest addresses. TU3
+# moves most code, so in the unpatched retail image those addresses are not
+# function starts, or are different functions, and the build cannot link
+# (KNOWN_ISSUES.md, KI-33). Refuse to configure instead of failing at link.
+if(NOT SKATE3_HAS_TITLE_UPDATE_CODEGEN)
+    message(FATAL_ERROR
+        "Skate 3 Title Update 3 is required to build. Place "
+        "TU_12K2276_000000C000000.00000000000O3 in the repository root, pass "
+        "-DSKATE3_TITLE_UPDATE_PACKAGE=<path>, or point SKATE3_GAME_DATA_ROOT "
+        "(now ${SKATE3_GAME_DATA_ROOT}) at a release install's game folder "
+        "that has the TU3 default.xexp and data/webkit/EAWebkit.xexp staged.")
 endif()
 
 if(SKATE3_HAS_TITLE_UPDATE_CODEGEN)
