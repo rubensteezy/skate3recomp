@@ -509,9 +509,10 @@ repro steps; the entry says where the problem is and how it would show.
 - **Area:** app lifetime
 - **Tracking:** none yet. Found while fixing KI-23 (#35).
 - **Where:** `OnPostSetup` / `OnShutdown` in `src/skate3_app_common.cpp`.
-- **Problem:** six callbacks capture `this` and are never cleared:
+- **Problem:** seven callbacks capture `this` and are never cleared:
   `input_system->SetActiveCallback`, `SetMenuChordCallback`,
-  `demo_path::SetUiInputProvider` and the three `options_menu::Set*Callback`.
+  `demo_path::SetUiInputProvider` and the four `options_menu::Set*Callback`
+  (the fourth, `SetQuitCallback`, came with KI-97).
   The active callback also reads `simple_settings_dialog_` on the input path
   while `OnShutdown` resets it on the UI thread. That's a data race or
   use-after-free on any path where `OnShutdown` runs while the guest is
@@ -1166,18 +1167,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** if testing at low budgets matters, lower the floor for dev
   builds or add a debug cvar.
 
-### KI-97: No way to quit from the game's own menus in fullscreen
-
-- **Status:** open (feature request)
-- **Area:** Options menu, app exit
-- **Tracking:** agent working on it (user request, 2026-10-28).
-- **Symptom:** in fullscreen there's no window X. A controller player can quit
-  only through the Esc overlay's Close Game. The game's own Options menu has
-  no quit option.
-- **Next step:** add a "Quit Game" row after the PC settings rows on the root
-  Options screen, with a confirmation popup (the popup-id mechanism from #40).
-  Exit through the same clean path as Close Game.
-
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
@@ -1666,3 +1655,48 @@ repro steps; the entry says where the problem is and how it would show.
 - `BuildItemFromMesh` initialisation: items are always fresh.
 - Photo FX MSAA latch: handled in `RenderScene`.
 - Null hair PSOs: checked at the point of use.
+
+### KI-97: No way to quit from the game's own menus in fullscreen
+
+- **Status:** fix in review (PR link below), tested unattended up to the
+  prompt. Quit and Cancel were not run: the user asked for no more test game
+  launches on this machine while other builds are tested.
+- **Area:** Options menu, app exit
+- **Tracking:** feature request from the user, 2026-10-28.
+- **Symptom:** in fullscreen there's no window X. A controller player could
+  quit only through the Esc overlay's Close Game. The game's own Options menu
+  had no quit option.
+- **Fix:** `src/skate3_options_menu.cpp` adds a Quit Game row after All PC
+  Settings on the root Options screen (Pause > Options > Game Settings, and
+  the front-end Options).
+  - Selecting it shows a popup through the same popup-id mechanism as the
+    restart prompt (`ShowPrompt`, answered in the `sub_8260EA48` hook). The
+    message is "Quit Skate 3? Progress since the last save will be lost."
+    (this popup style shows only the message, not the title). The buttons
+    are the game's own localized `ID_COMMON_CANCEL` and `ID_COMMON_QUIT`, in
+    that order, like the game's own quit prompts (No before Yes), so the
+    default button cancels.
+  - Quit saves the settings and then calls `Skate3BaseApp::CloseGame` in
+    `src/skate3_app_common.cpp`. That is the overlay's Close Game exit,
+    factored out so both use it: `window()->RequestClose()` on Windows and
+    Linux ("Window closing, shutting down..." then "Title terminated"),
+    `QuitFromUIThread` on macOS, plus the 10 s watchdog on macOS and Linux.
+  - Quitting waits (up to 15 s) for a saved game that's open for writing.
+    The XDK `XContentCreate` / `XContentClose` wrappers (`sub_82EDE718` /
+    `sub_82EDE7A8`) are hooked to track saved-game content opened with any
+    disposition other than "open existing".
+  - The seventh root row needed a seventh spare option id. The only ones
+    left (13, 24, 26) are still live selectors in the input handler
+    (`sub_8260C258`) and the value getter (`sub_8260D968`). Id 24 (units) is
+    used, and both hooks now answer for our root rows, so left/right on
+    them do nothing.
+- **Tested unattended (demo-path pad inputs, windowed):** the row shows
+  after All PC Settings, A on it shows the prompt ("quit prompt shown"
+  logged, PrintWindow screenshot), and the game's `ID_COMMON_QUIT` /
+  `ID_COMMON_CANCEL` resolve to "Quit" / "Cancel". At boot the career save
+  `rmcsave` is opened five times, all "open existing" (reads), and each is
+  closed within about 10 ms, so the save tracking doesn't hold a quit back
+  on reads.
+- **Not tested:** Quit, Cancel, a quit during an autosave, and macOS/Linux.
+  B does not dismiss this popup: in the one run, B on the open prompt did
+  nothing and no callback fired. Cancel is the highlighted button and needs A.

@@ -4,15 +4,18 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,6 +37,7 @@ namespace {
 std::function<void()> g_open_settings;
 std::function<void()> g_save_settings;
 std::function<void()> g_restart;
+std::function<void()> g_quit;
 }  // namespace
 
 #if SKATE3_HAS_TITLE_UPDATE
@@ -50,8 +54,9 @@ namespace {
 //   The movie pulls everything through GameSettings_* APT natives and the
 //   state's per-row getters; Back (input handler, event 3) always returns to
 //   the root screen.
-// Option ids that no layout uses and no handler special-cases are borrowed for
-// our root rows (titles repointed at our string IDs, types at "option"). Our
+// Option ids that no layout uses are borrowed for our root rows (titles
+// repointed at our string IDs, types at "option"). Ids the game's handlers
+// still special-case (24, a selector) get those paths answered for our row. Our
 // pages are screen ids past the game's tables (kFirstPageScreen + page index)
 // that every table reader below answers for from host rows. All text goes
 // through the localizer hook, which resolves our host-owned string IDs.
@@ -74,6 +79,9 @@ constexpr SpareOption kSpareOptions[] = {
     {27, "ID_GAMESETTINGS_RESET_CAREER", "option"},
     {18, "ID_GAMESETTINGS_VSYNC_TOGGLE", "selector"},
     {20, "ID_GAMESETTINGS_SIXAXIS_TOGGLE", "selector"},
+    // Still a live selector in the input handler (left/right toggle the
+    // distance units) and the value getter; both are answered for our row.
+    {24, "ID_GAMESETTINGS_UNITS_TOGGLE", "selector"},
 };
 constexpr int32_t kAudioOptionId = 3;      // layout sanity check
 constexpr int32_t kOptionTypeId = 23;      // its type pointer: "option"
@@ -153,11 +161,14 @@ struct Page {
   uint32_t title_id = 0;
 };
 
-// A row we add to the root Options screen: opens a page or the overlay.
+// A row we add to the root Options screen: opens a page or the overlay, or
+// asks to quit the game.
+constexpr int kOverlayPage = -1;  // RootRow::page: the host settings overlay
+constexpr int kQuitPage = -2;     // RootRow::page: the Quit Game prompt
 struct RootRow {
   std::string title;
   int32_t option_id = 0;
-  int page = -1;  // -1 = the host settings overlay
+  int page = kOverlayPage;  // a g_pages index, kOverlayPage or kQuitPage
   uint32_t title_id = 0;
 };
 
@@ -173,12 +184,29 @@ uint32_t g_popup_desc = 0;
 // that closes it (a button, a flush, a screen closing it by id) can leave a
 // stale "open" state behind.
 int32_t g_restart_popup_id = kNoPopup;  // guest thread only
+// Same for the Quit Game prompt.
+int32_t g_quit_popup_id = kNoPopup;  // guest thread only
 
-// String IDs of the restart prompt (copied into the popup descriptor).
-constexpr std::string_view kRestartTitleId = "ID_RECOMP_RESTART_TITLE";
-constexpr std::string_view kRestartMessageId = "ID_RECOMP_RESTART_MESSAGE";
-constexpr std::string_view kRestartNowId = "ID_RECOMP_RESTART_NOW";
-constexpr std::string_view kRestartDiscardId = "ID_RECOMP_RESTART_DISCARD";
+// A two-button popup's string IDs (copied into the popup descriptor).
+struct Prompt {
+  std::string_view name;  // for the log
+  std::string_view title;
+  std::string_view message;
+  std::string_view buttons[2];
+};
+constexpr Prompt kRestartPrompt = {"restart",
+                                   "ID_RECOMP_RESTART_TITLE",
+                                   "ID_RECOMP_RESTART_MESSAGE",
+                                   {"ID_RECOMP_RESTART_NOW", "ID_RECOMP_RESTART_DISCARD"}};
+// The buttons are the game's own localized Cancel / Quit, in the order of its
+// own quit prompts (No before Yes), so A on the default button cancels. This
+// popup style shows the message, not the title, so the message carries the
+// question.
+constexpr Prompt kQuitPrompt = {"quit",
+                                "ID_RECOMP_QUIT_TITLE",
+                                "ID_RECOMP_QUIT_MESSAGE",
+                                {"ID_COMMON_CANCEL", "ID_COMMON_QUIT"}};
+constexpr int32_t kQuitButton = 1;
 
 // Same hash GetLocaleText (sub_825AA818) feeds the localizer.
 uint32_t LocaleHash(std::string_view id) {
@@ -437,8 +465,9 @@ void BuildMenu() {
     g_root_rows.push_back({page.title, 0, static_cast<int>(g_pages.size())});
     g_pages.push_back(std::move(page));
   }
-  g_root_rows.push_back({"All PC Settings", 0, -1});
-  static_assert(std::size(kSpareOptions) >= 6, "one spare option id per root row");
+  g_root_rows.push_back({"All PC Settings", 0, kOverlayPage});
+  g_root_rows.push_back({"Quit Game", 0, kQuitPage});
+  static_assert(std::size(kSpareOptions) >= 7, "one spare option id per root row");
   for (size_t i = 0; i < g_root_rows.size(); ++i) {
     g_root_rows[i].option_id = kSpareOptions[i].id;
   }
@@ -470,11 +499,13 @@ bool PublishStrings(rex::memory::Memory* memory, uint8_t* base) {
   // Popup strings: only their localized text is needed (the descriptor holds
   // copies of the IDs).
   const std::pair<std::string_view, std::string_view> popup_text[] = {
-      {kRestartTitleId, "Restart Required"},
-      {kRestartMessageId,
+      {kRestartPrompt.title, "Restart Required"},
+      {kRestartPrompt.message,
        "Some changes take effect after Skate 3 restarts. Restart now to apply them?"},
-      {kRestartNowId, "Restart Now"},
-      {kRestartDiscardId, "Discard Changes"},
+      {kRestartPrompt.buttons[0], "Restart Now"},
+      {kRestartPrompt.buttons[1], "Discard Changes"},
+      {kQuitPrompt.title, "Quit Skate 3?"},
+      {kQuitPrompt.message, "Quit Skate 3? Progress since the last save will be lost."},
   };
   for (const auto& [id, text] : popup_text) {
     entries.emplace_back(std::string(id), std::string(text));
@@ -714,11 +745,11 @@ bool PopupShown(uint8_t* base, int32_t id) {
   return false;
 }
 
-// "Restart Required: Restart Now / Discard Changes", answered in the
-// sub_8260EA48 hook below. Returns true when the prompt is up (already shown
-// or shown now).
-bool ShowRestartPrompt(PPCContext& ctx, uint8_t* base) {
-  if (PopupShown(base, g_restart_popup_id)) {
+// Shows a two-button popup answered in the sub_8260EA48 hook below, unless
+// the popup `id` names is still up. Returns false (and leaves `id` alone)
+// when there is no popup manager.
+bool ShowPrompt(PPCContext& ctx, uint8_t* base, const Prompt& prompt, int32_t& id) {
+  if (PopupShown(base, id)) {
     return true;
   }
   const uint32_t manager = REX_LOAD_U32(kPopupManagerPtr);
@@ -728,18 +759,126 @@ bool ShowRestartPrompt(PPCContext& ctx, uint8_t* base) {
   const uint32_t desc = g_popup_desc;
   ctx.r3.u64 = desc;
   sub_82D0B0B0(ctx, base);
-  CopyGuestString(base, desc + kPopupTitleOffset, kRestartTitleId);
-  CopyGuestString(base, desc + kPopupMessageOffset, kRestartMessageId);
+  CopyGuestString(base, desc + kPopupTitleOffset, prompt.title);
+  CopyGuestString(base, desc + kPopupMessageOffset, prompt.message);
   REX_STORE_U32(desc + kPopupButtonCountOffset, 2);
-  CopyGuestString(base, desc + kPopupButtonOffsets[0], kRestartNowId);
-  CopyGuestString(base, desc + kPopupButtonOffsets[1], kRestartDiscardId);
+  CopyGuestString(base, desc + kPopupButtonOffsets[0], prompt.buttons[0]);
+  CopyGuestString(base, desc + kPopupButtonOffsets[1], prompt.buttons[1]);
   REX_STORE_U32(desc + kPopupCallbackOffset, kPopupCallback);
   ctx.r3.u64 = manager;
   ctx.r4.u64 = desc;
   sub_82D0A8D0(ctx, base);
-  g_restart_popup_id = ctx.r3.s32;  // the new popup's id
-  REXLOG_INFO("Options menu: restart prompt shown (popup {})", g_restart_popup_id);
+  id = ctx.r3.s32;  // the new popup's id
+  REXLOG_INFO("Options menu: {} prompt shown (popup {})", prompt.name, id);
   return true;
+}
+
+// "Restart Required: Restart Now / Discard Changes". Returns true when the
+// prompt is up (already shown or shown now).
+bool ShowRestartPrompt(PPCContext& ctx, uint8_t* base) {
+  return ShowPrompt(ctx, base, kRestartPrompt, g_restart_popup_id);
+}
+
+// "Quit Skate 3?: Quit / Cancel", from the root Quit Game row.
+void ShowQuitPrompt(PPCContext& ctx, uint8_t* base) {
+  if (!ShowPrompt(ctx, base, kQuitPrompt, g_quit_popup_id)) {
+    REXLOG_WARN("Options menu: no popup manager; Quit Game prompt not shown");
+  }
+}
+
+// ---- Saves in flight -----------------------------------------------------------
+
+// Every guest content open and close goes through the XDK's XContentCreate /
+// XContentClose wrappers (sub_82EDE718 -> XamContentCreateEx, sub_82EDE7A8 ->
+// XamContentClose; r4 / r3 = root name). A saved game opened with any
+// disposition but "open existing" is being written until it is closed: the
+// career autosave writes its files between the two and the close commits
+// them. Hooked below; any guest thread.
+constexpr uint32_t kContentTypeSavedGame = 1;   // XCONTENT_DATA +4
+constexpr uint32_t kDispositionMask = 0xF;      // XContentCreate flags
+constexpr uint32_t kDispositionOpenExisting = 3;
+constexpr uint32_t kErrorIoPending = 997;       // overlapped open still running
+constexpr size_t kRootNameMax = 64;
+std::mutex g_saves_mutex;
+std::unordered_map<std::string, int> g_open_saves;  // root name -> write opens
+std::atomic<int> g_saves_in_flight{0};
+
+std::string GuestRootName(uint8_t* base, uint32_t address) {
+  if (address < 0x10000) {
+    return {};
+  }
+  const char* text = reinterpret_cast<const char*>(base + address);
+  return std::string(text, strnlen(text, kRootNameMax));
+}
+
+void SaveOpened(const std::string& root) {
+  std::lock_guard lock(g_saves_mutex);
+  ++g_open_saves[root];
+  g_saves_in_flight.fetch_add(1, std::memory_order_acq_rel);
+  REXLOG_INFO("Saved game '{}' opened for writing", root);
+}
+
+void SaveClosed(const std::string& root) {
+  std::lock_guard lock(g_saves_mutex);
+  const auto it = g_open_saves.find(root);
+  if (it == g_open_saves.end()) {
+    return;  // a read-only open, or content that is not a saved game
+  }
+  if (--it->second == 0) {
+    g_open_saves.erase(it);
+  }
+  g_saves_in_flight.fetch_sub(1, std::memory_order_acq_rel);
+  REXLOG_INFO("Saved game '{}' closed", root);
+}
+
+bool SaveInFlight() { return g_saves_in_flight.load(std::memory_order_acquire) > 0; }
+
+// ---- Quit ------------------------------------------------------------------------
+
+// A save that is still open after this long is treated as stuck (or one this
+// tracking never saw close) and no longer holds the quit back.
+constexpr auto kQuitSaveWait = std::chrono::seconds(15);
+constexpr auto kQuitSavePoll = std::chrono::milliseconds(50);
+std::atomic<bool> g_quitting{false};
+
+// Persist the settings, then the overlay's Close Game exit. Both marshal to
+// the UI thread in order, so the file is written first. Any thread.
+void QuitNow() {
+  if (g_save_settings) {
+    g_save_settings();
+  }
+  if (g_quit) {
+    g_quit();
+  }
+}
+
+// Quit confirmed. A save in flight is let finish first (polled off the guest
+// thread, so the game keeps running and the save completes). Restart-required
+// choices still staged (a restart prompt dismissed without an answer) are not
+// applied, as with Discard Changes.
+void QuitGame() {
+  if (g_quitting.exchange(true)) {
+    return;
+  }
+  if (!SaveInFlight()) {
+    REXLOG_INFO("Options menu: Quit Game confirmed; saving settings and closing the game");
+    QuitNow();
+    return;
+  }
+  REXLOG_INFO("Options menu: Quit Game confirmed; waiting for the save in progress");
+  std::thread([]() {
+    const auto deadline = std::chrono::steady_clock::now() + kQuitSaveWait;
+    while (SaveInFlight() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(kQuitSavePoll);
+    }
+    if (SaveInFlight()) {
+      REXLOG_WARN("Options menu: save still open after {} s; closing the game anyway",
+                  std::chrono::duration_cast<std::chrono::seconds>(kQuitSaveWait).count());
+    } else {
+      REXLOG_INFO("Options menu: save finished; saving settings and closing the game");
+    }
+    QuitNow();
+  }).detach();
 }
 
 void ApplyPendingAndRestart() {
@@ -798,6 +937,8 @@ void SetSaveSettingsCallback(std::function<void()> callback) {
 }
 
 void SetRestartCallback(std::function<void()> callback) { g_restart = std::move(callback); }
+
+void SetQuitCallback(std::function<void()> callback) { g_quit = std::move(callback); }
 
 void Install() {
 #if SKATE3_HAS_TITLE_UPDATE
@@ -863,9 +1004,20 @@ extern "C" REX_FUNC(sub_8290C1C0) {
 
 // Popup result callback (r3 = popup id, r4 = button index or -2 when the
 // manager flushes its popups). Owned by the Options screen's Video
-// Calibration popup; answers only for the restart prompt's own id, so any
-// other popup sharing this callback always reaches the game's handler.
+// Calibration popup; answers only for our prompts' own ids, so any other
+// popup sharing this callback always reaches the game's handler.
 extern "C" REX_FUNC(sub_8260EA48) {
+  if (IsInstalled() && g_quit_popup_id != kNoPopup && ctx.r3.s32 == g_quit_popup_id) {
+    g_quit_popup_id = kNoPopup;
+    const int32_t button = ctx.r4.s32;
+    REXLOG_INFO("Options menu: quit prompt answered (button {})", button);
+    if (button == kQuitButton) {
+      QuitGame();
+    }
+    // Cancel or a flush: the popup is gone and the Options screen it covered
+    // takes input again.
+    return;
+  }
   if (IsInstalled() && g_restart_popup_id != kNoPopup && ctx.r3.s32 == g_restart_popup_id) {
     g_restart_popup_id = kNoPopup;
     const int32_t button = ctx.r4.s32;
@@ -896,7 +1048,8 @@ extern "C" REX_FUNC(sub_8260EA48) {
 // ---- FrontEndState_Options methods (r3 = state) -------------------------------
 
 // OnMenuSelect(menu, row = r5, item name). Our root rows open their page or
-// the overlay; on our pages A does nothing, as on the game's own selectors.
+// the overlay, or ask to quit; on our pages A does nothing, as on the game's
+// own selectors.
 extern "C" REX_FUNC(sub_8260D290) {
   if (IsInstalled()) {
     const uint32_t state = ctx.r3.u32;
@@ -909,6 +1062,8 @@ extern "C" REX_FUNC(sub_8260D290) {
         REX_STORE_U32(state + kStateScreenOffset,
                       kFirstPageScreen + static_cast<uint32_t>(root->page));
         RefreshScreen(ctx, base, state, kRefreshScreen);
+      } else if (root->page == kQuitPage) {
+        ShowQuitPrompt(ctx, base);
       } else if (g_open_settings) {
         g_open_settings();
       }
@@ -921,11 +1076,18 @@ extern "C" REX_FUNC(sub_8260D290) {
 // Input handler (r5 = event). On our pages left/right step selectors, and
 // Back either prompts to restart (staged restart-required changes) or keeps
 // the game's handling (the root Options screen). Nothing else is consumed, so
-// the game never indexes its tables with a page's screen id.
+// the game never indexes its tables with a page's screen id. On the game's
+// screens left/right on one of our root rows do nothing (the game would step
+// the selector a borrowed id still is there).
 extern "C" REX_FUNC(sub_8260C258) {
   if (IsInstalled()) {
     const uint32_t state = ctx.r3.u32;
     const uint32_t event = ctx.r5.u32;
+    if ((event == kInputLeft || event == kInputRight) && !PageOf(base, state) &&
+        RootRowAt(base, state, REX_LOAD_U32(state + kStateRowOffset))) {
+      ctx.r3.u64 = 0;
+      return;
+    }
     if (Page* page = PageOf(base, state)) {
       if (event == kInputBack) {
         if (HasPendingRestart() && ShowRestartPrompt(ctx, base)) {
@@ -970,9 +1132,13 @@ extern "C" REX_FUNC(sub_8260D7E8) {
   __imp__sub_8260D7E8(ctx, base);
 }
 
-// Row value string ID (r4 = row).
+// Row value string ID (r4 = row). Our root rows have no value.
 extern "C" REX_FUNC(sub_8260D968) {
   if (IsInstalled()) {
+    if (RootRowAt(base, ctx.r3.u32, ctx.r4.u32)) {
+      ctx.r3.u64 = kStringEmpty;
+      return;
+    }
     if (Page* page = PageOf(base, ctx.r3.u32)) {
       const Row* row = RowAt(*page, ctx.r4.u32);
       const std::optional<int> label = row ? ShownLabel(*row) : std::nullopt;
@@ -1050,6 +1216,28 @@ extern "C" REX_FUNC(sub_825A6E88) {
     args.Restore();
   }
   __imp__sub_825A6E88(ctx, base);
+}
+
+// ---- XContentCreate / XContentClose (saves in flight) -------------------------------
+
+// XContentCreate(user r3, root name r4, XCONTENT_DATA* r5, flags r6, ...).
+extern "C" REX_FUNC(sub_82EDE718) {
+  const uint32_t content = ctx.r5.u32;
+  const bool write = content >= 0x10000 &&
+                     REX_LOAD_U32(content + 4) == kContentTypeSavedGame &&
+                     (ctx.r6.u32 & kDispositionMask) != kDispositionOpenExisting;
+  const std::string root = write ? GuestRootName(base, ctx.r4.u32) : std::string();
+  __imp__sub_82EDE718(ctx, base);
+  if (write && (ctx.r3.u32 == 0 || ctx.r3.u32 == kErrorIoPending)) {
+    SaveOpened(root);
+  }
+}
+
+// XContentClose(root name r3, overlapped r4).
+extern "C" REX_FUNC(sub_82EDE7A8) {
+  const std::string root = GuestRootName(base, ctx.r3.u32);
+  __imp__sub_82EDE7A8(ctx, base);
+  SaveClosed(root);
 }
 
 // GameSettings_GetButtonHelpTextA(): no A prompt on page rows (all
