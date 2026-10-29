@@ -1400,7 +1400,8 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-16: Upload rings reused without a GPU completion check
 
-- **Status:** fixed in rubensteezy/skate3recomp#28, in-game test pending · was BT-09
+- **Status:** fix in review (rubensteezy/skate3recomp#28), awaiting in-game
+  test · was BT-09
 - **Problem:** the native renderer's per-frame upload rings (bone + ROPA
   vertices, UI vertices, shadow constants, photo FX constants, screen FX
   constants) picked their region with `frame_number % N` and never checked
@@ -1419,6 +1420,34 @@ repro steps; the entry says where the problem is and how it would show.
   flight the oldest is reused (the old behavior) and the log says "upload ring
   <name>: all N regions in flight" (rate-limited). "upload ring <name>: K/N
   regions in flight" lines log a new high of half the ring or more.
+- **Reported regression (2026-10-28, D3D12, 4K, MSAA 8x):** with #28's
+  build the replay editor dropped to a low frame rate that seemed to get
+  worse; a main build from 2026-10-13 felt fine. The run log shows the
+  native frame rate falling from 120 fps to 42-50 fps in two windows,
+  21:27:41-21:27:53 and 21:28:18 onward, with 120 fps in between.
+- **Cause:** not #28. Another worktree's full game build
+  (`agent-a164568a7fb15f931`, compiling the `skate3_recomp.*.cpp` units on
+  every core) ran at the same time. Its `.ninja_log` and object timestamps
+  put two builds at 21:27:39-21:27:57 and 21:28:17-21:31:19. Those match the
+  two slow windows to within about 2 s, and the 120 fps stretch is the gap
+  between them. The "SLOW frame maintenance ... dissolve=11930us/1" lines fit
+  CPU starvation too. That step normally takes about 0.1 ms for one view, and
+  #28 creates and destroys no views. #28's region picker is pure CPU work of a
+  few nanoseconds per call. A standalone copy measured 1.6-17 ns per call, with
+  exactly one pick per ring per frame, no growth, and no allocations. Every
+  `Region()` call is inside `RenderScene`, which runs once per native frame on
+  every screen: gameplay, replay editor, photo editor, Create-a-Skater and the
+  pause menu.
+- **Diagnostics added:** `--skate3_native_render_scene_upload_ring_log=true`
+  logs one "upload rings:" line per perf interval. It shows the window's
+  fps, ms per frame and pick time, GPU lag in submissions, and for each ring
+  the calls, picks, skips, fallbacks and peak regions in flight.
+  `skate3_native_render_scene_upload_ring_gate` (default on) switches back to
+  the old `frame_number % N` pick at runtime, for an A/B check. Both are also
+  checkboxes in F12 > Diagnostics > "Upload rings (KI-16)".
+- **To confirm:** run the replay editor for 2 minutes with no build running
+  on the machine. Frame time should match main, and toggling the gate should
+  not change it.
 
 ### KI-34: Own the Spot / Own the Lot UI pops in and out or draws wrong
 

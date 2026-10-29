@@ -89,6 +89,8 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_mesh_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_pause_native);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_perf_log);
 REXCVAR_DECLARE(int32_t, skate3_native_render_scene_perf_interval);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_upload_ring_gate);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_upload_ring_log);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_perf_items);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_occlusion_cull);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_photo_display_yield);
@@ -2705,11 +2707,30 @@ static_assert(RendererState::kUiRegions <= UploadRingRegions::kMaxRegions);
 static_assert(RendererState::kPfxCbRegions <= UploadRingRegions::kMaxRegions);
 static_assert(RendererState::kScreenFxCbRegions <= UploadRingRegions::kMaxRegions);
 
-void UploadRingRegions::Acquire(nrhi::Device* device) {
+void UploadRingRegions::Acquire(nrhi::Device* device, uint64_t frame_number) {
+  ++stats_.acquires;
+  if (!REXCVAR_GET(skate3_native_render_scene_upload_ring_log)) {
+    Pick(device, frame_number);
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  Pick(device, frame_number);
+  stats_.acquire_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - t0)
+                                    .count());
+}
+
+void UploadRingRegions::Pick(nrhi::Device* device, uint64_t frame_number) {
   const uint64_t completed = device->CompletedSubmission();
   uint32_t in_flight = 0;
   for (uint32_t i = 0; i < count_; ++i) {
     in_flight += submission_[i] > completed ? 1u : 0u;
+  }
+  stats_.in_flight_max = std::max(stats_.in_flight_max, in_flight);
+  // A/B switch: the pre-#28 pick, no completion check.
+  if (!REXCVAR_GET(skate3_native_render_scene_upload_ring_gate)) {
+    current_ = uint32_t(frame_number % count_);
+    return;
   }
   // A new high of half the ring or more means the GPU lags far enough to
   // matter; at most count_ lines per ring per run.
@@ -2725,6 +2746,7 @@ void UploadRingRegions::Acquire(nrhi::Device* device) {
   for (uint32_t i = 1; i <= count_; ++i) {
     const uint32_t r = (current_ + i) % count_;
     if (submission_[r] <= completed) {
+      stats_.skips += i != 1 ? 1u : 0u;
       current_ = r;
       return;
     }
@@ -2736,6 +2758,7 @@ void UploadRingRegions::Acquire(nrhi::Device* device) {
   // wait on a fence, so reuse the oldest one (the pre-KI-16 behavior) and
   // say so: the frame may show stale HUD, bones or constants.
   const uint32_t n = exhausted_++;
+  ++stats_.fallbacks;
   if (n < 8 || (n & 1023u) == 0) {
     REXLOG_WARN(
         "upload ring {}: all {} regions in flight (completed submission {}, oldest "
@@ -2743,6 +2766,69 @@ void UploadRingRegions::Acquire(nrhi::Device* device) {
         name_, count_, completed, submission_[oldest], n + 1);
   }
   current_ = oldest;
+}
+
+// Optional (skate3_native_render_scene_upload_ring_log): one line per perf
+// interval with each ring's counters, the window's frame rate and how far
+// the GPU trails the CPU. Proves from a run log whether the ring helper
+// does more than one pick per frame, falls back, or costs measurable time.
+// GPU lag here is CurrentSubmission - CompletedSubmission at the end of the
+// frame: 1-2 is a CPU-bound or idle GPU, 3+ a GPU that can't keep up.
+static void LogUploadRingStats(nrhi::Device* device, uint64_t frames) {
+  static uint64_t s_lag_max = 0;
+  static uint64_t s_lag_sum = 0;
+  static uint64_t s_lag_n = 0;
+  static uint64_t s_window_frame = 0;
+  static std::chrono::steady_clock::time_point s_window_t0{};
+  if (!REXCVAR_GET(skate3_native_render_scene_upload_ring_log)) {
+    s_window_frame = 0;
+    return;
+  }
+  const uint64_t cur = device->CurrentSubmission();
+  const uint64_t done = device->CompletedSubmission();
+  const uint64_t lag = cur > done ? cur - done : 0;
+  s_lag_max = std::max(s_lag_max, lag);
+  s_lag_sum += lag;
+  ++s_lag_n;
+  const auto now = std::chrono::steady_clock::now();
+  const uint64_t interval = uint64_t(
+      std::max(60, REXCVAR_GET(skate3_native_render_scene_perf_interval)));
+  if (s_window_frame == 0) {
+    // First frame with the log on: drop counts from before it.
+    s_window_frame = frames;
+    s_window_t0 = now;
+    s_lag_max = s_lag_sum = s_lag_n = 0;
+    for (UploadRingRegions* ring : {&g_r.bone_regions, &g_r.ui_regions, &g_r.shadow_cb_regions,
+                                    &g_r.pfx_cb_regions, &g_r.screen_fx_cb_regions}) {
+      ring->TakeStats();
+    }
+    return;
+  }
+  if (frames - s_window_frame < interval) {
+    return;
+  }
+  const uint64_t n = frames - s_window_frame;
+  const double secs = std::chrono::duration<double>(now - s_window_t0).count();
+  std::string rings;
+  uint64_t acquire_ns = 0;
+  for (UploadRingRegions* ring : {&g_r.bone_regions, &g_r.ui_regions, &g_r.shadow_cb_regions,
+                                  &g_r.pfx_cb_regions, &g_r.screen_fx_cb_regions}) {
+    const UploadRingRegions::Stats s = ring->TakeStats();
+    acquire_ns += s.acquire_ns;
+    rings += fmt::format(" | {}: calls={} picks={} skips={} fallbacks={} inflight_max={}",
+                         ring->name(), s.calls, s.acquires, s.skips, s.fallbacks,
+                         s.in_flight_max);
+  }
+  REXLOG_INFO(
+      "upload rings: {} frames in {:.2f}s ({:.0f} fps, {:.2f} ms/frame), gate={}, "
+      "pick time {:.1f}us total ({:.3f}us/frame), gpu lag avg={:.2f} max={}{}",
+      n, secs, secs > 0.0 ? double(n) / secs : 0.0, secs * 1000.0 / double(n),
+      REXCVAR_GET(skate3_native_render_scene_upload_ring_gate) ? "on" : "off(legacy % N)",
+      double(acquire_ns) / 1000.0, double(acquire_ns) / 1000.0 / double(n),
+      s_lag_n ? double(s_lag_sum) / double(s_lag_n) : 0.0, s_lag_max, rings);
+  s_window_frame = frames;
+  s_window_t0 = now;
+  s_lag_max = s_lag_sum = s_lag_n = 0;
 }
 
 // ---- EnsurePipeline helpers ------------------------------------------------
@@ -12382,6 +12468,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   MaybeDumpSceneRing();
   LogFrameStats(scene, frames, drawn, drawn_2d, drawn_spline, shadow_ready,
                 shadow_draws);
+  LogUploadRingStats(context.device, frames);
   return true;
 }
 

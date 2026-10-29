@@ -496,16 +496,33 @@ inline void SwapGuestEndian(uint8_t* data, uint32_t size, xenos::Endian endian) 
 // call per RenderScene run covers all of the frame's references, and a
 // frame retried after a yield re-marks its region with the new submission.
 // Render thread only.
+//
+// Diagnostics (replay-editor frame-rate report against #28): the cvar
+// skate3_native_render_scene_upload_ring_gate=false switches back to the
+// old `frame_number % N` pick at runtime (F12 > Diagnostics) for an A/B
+// check, and skate3_native_render_scene_upload_ring_log=true logs the
+// per-ring counters below every perf interval (LogUploadRingStats).
 class UploadRingRegions {
  public:
   static constexpr uint32_t kMaxRegions = 8;
+
+  // Counters since the last TakeStats().
+  struct Stats {
+    uint64_t calls = 0;      // Region() calls
+    uint64_t acquires = 0;   // new-frame picks
+    uint64_t skips = 0;      // picks that were not the next region in order
+    uint64_t fallbacks = 0;  // every region in flight, oldest reused
+    uint32_t in_flight_max = 0;
+    uint64_t acquire_ns = 0;  // time in Acquire (only while the log is on)
+  };
 
   constexpr UploadRingRegions(const char* name, uint32_t count)
       : name_(name), count_(count) {}
 
   uint32_t Region(nrhi::Device* device, uint64_t frame_number) {
+    ++stats_.calls;
     if (!acquired_ || frame_number != frame_) {
-      Acquire(device);
+      Acquire(device, frame_number);
       frame_ = frame_number;
       acquired_ = true;
     }
@@ -513,8 +530,17 @@ class UploadRingRegions {
     return current_;
   }
 
+  const char* name() const { return name_; }
+  Stats TakeStats() {
+    const Stats s = stats_;
+    stats_ = Stats{};
+    return s;
+  }
+
  private:
-  void Acquire(nrhi::Device* device);  // skate3_native_scene_gpu.cpp
+  // skate3_native_scene_gpu.cpp
+  void Acquire(nrhi::Device* device, uint64_t frame_number);
+  void Pick(nrhi::Device* device, uint64_t frame_number);
 
   const char* name_;
   uint32_t count_;
@@ -524,6 +550,7 @@ class UploadRingRegions {
   uint32_t current_ = 0;
   uint32_t in_flight_high_ = 0;
   uint32_t exhausted_ = 0;
+  Stats stats_{};
 };
 
 struct RendererState {
