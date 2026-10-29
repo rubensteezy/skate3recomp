@@ -270,28 +270,6 @@ repro steps; the entry says where the problem is and how it would show.
   records the 2D draws with their inline vertex data. Decode the 32-byte
   vertices, compare with F5, then add the layout to `Publish2dDraws`.
 
-### KI-38: Frames-in-flight limit may skip frames only the native renderer draws
-
-- **Status:** open (unconfirmed) · **Severity:** low–medium
-- **Area:** SDK command processor, frame pacing
-- **Tracking:** none yet. Found while fixing KI-16 (#28).
-- **Where:** rexglue-sdk `src/graphics/d3d12/command_processor.cpp`,
-  `EndSubmission`. It sets `is_closing_frame = is_swap && frame_open_`, and
-  only a closed frame enters the `kQueueFrames` = 3 wait in
-  `BeginSubmission`. The Vulkan command processor has the same pattern with
-  `kMaxFramesInFlight` = 3.
-- **Problem:** if the native frame's `EndSubmission(true)` runs with no frame
-  open (for example with guest draws suppressed), nothing limits how far the
-  GPU falls behind. Input latency would grow and the upload rings would run
-  out of free regions. The #28 log line "upload ring <name>: all N regions in
-  flight" would then appear.
-- **Evidence:** the code path only, not checked at runtime. The bone-ring
-  comment in `skate3_native_scene_gpu_internal.h` records the Vulkan GPU
-  running more than 3 frames behind, which would fit.
-- **Next step:** log `frame_open_` at the native `EndSubmission(true)` on both
-  backends during gameplay. If it is false, open the frame in
-  `NativeRhiBeginFrame`.
-
 ### KI-39: The native RHI has no way to wait on a GPU submission
 
 - **Status:** open · **Severity:** low
@@ -1509,6 +1487,52 @@ repro steps; the entry says where the problem is and how it would show.
 - **Emulated (F5), not fixed here:** in a gameplay presence context with
   `readback_resolve=none`, the emulated renderer would read the same stale
   memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
+
+### KI-38: Frames-in-flight limit may skip frames only the native renderer draws
+
+- **Status:** not a bug. No code change. Measured on `main` (f4d8500) with
+  temporary logging, unattended, on D3D12 and Vulkan.
+- **Suspicion:** rexglue-sdk's command processors only wait for a free frame
+  (`kQueueFrames` / `kMaxFramesInFlight` = 3, in `BeginSubmission`) when a
+  frame opens, and `EndSubmission` only closes a frame when `frame_open_` is
+  set. If the native frame's `EndSubmission(true)` ran with no frame open, the
+  GPU could fall any number of frames behind.
+- **Why it can't happen:** `IssueSwap` on both backends calls
+  `BeginSubmission(true)` before it calls the presenter's refresher ("in case
+  the swap command is the only one in the frame"), and the Vulkan refresher
+  calls it again. That opens the frame, and waits for the frame 3 back, even
+  when every guest draw is suppressed. The native renderer runs inside the
+  refresher, and nothing in the native RHI (`native_rhi_d3d12.cpp`,
+  `native_rhi_vulkan.cpp`) ends a submission, so the frame is still open when
+  the refresher's `EndSubmission(true)` closes it.
+- **Measured:** temporary logging at the native `EndSubmission(true)` on both
+  backends recorded `frame_open_` before the call and the frames whose closing
+  submission the real fence hadn't reached yet (D3D12 `GetCompletedValue`,
+  Vulkan `vkGetFenceStatus`). `--skate3_demo_path=true`, native renderer on,
+  about 100 s of each run in gameplay. #28's upload-ring code was applied on
+  top for the measurement.
+
+  | Run | Native frames | `frame_open_` false | Frames in flight (max) | Frame time |
+  |---|---|---|---|---|
+  | D3D12, defaults | 25,200 | 0 | 1 (99.8%), 2 (51 frames) | 4.4 ms |
+  | Vulkan, defaults | 26,400 | 0 | 1 (99.99%), 2 (1 frame) | 4.5 ms |
+  | D3D12, GPU-bound | 7,800 | 0 | 3 in gameplay, never 4 | 15.9 ms |
+  | Vulkan, GPU-bound | 9,600 | 0 | 3 in gameplay, never 4 | 12.9 ms |
+
+  GPU-bound runs added `--resolution_scale=6
+  --skate3_native_render_scene_msaa=8 --skate3_native_render_scene_ssr=true
+  --skate3_native_render_scene_ssr_steps=64
+  --skate3_native_render_scene_shafts_res=2
+  --skate3_native_render_scene_ssao_full_res=true`. The cap holds at exactly
+  3. #28's "upload ring <name>: K/N regions in flight" (logged at half the
+  8-region ring or more) and "all N regions in flight" lines never appeared.
+- **The "more than 3 frames behind" comment:** the bone-ring comment in
+  `skate3_native_scene_gpu_internal.h` most likely counted submissions, not
+  frames. Vulkan reached 6 submissions in flight while loading (several
+  submissions per frame) with frames still at 3 or fewer. A ring keyed by
+  frame number with 4 or more regions is never reused while the GPU reads it,
+  so the hair and garment corruption that comment describes had some other
+  cause.
 
 ### Reviewed and ruled out (code review)
 
