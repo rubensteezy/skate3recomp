@@ -470,10 +470,13 @@ std::filesystem::path InstalledMarketplaceHeaderPath(const std::filesystem::path
 
 bool IsInstalledMarketplaceContent(const std::filesystem::path& content_root, uint32_t title_id,
                                    const std::filesystem::path& package_path) {
+  // error_code overloads: an unreadable install path counts as "not
+  // installed" instead of throwing out of the startup DLC scan (KI-19).
+  std::error_code ec;
   return std::filesystem::is_directory(
-             InstalledMarketplaceContentPath(content_root, title_id, package_path)) &&
+             InstalledMarketplaceContentPath(content_root, title_id, package_path), ec) &&
          std::filesystem::is_regular_file(
-             InstalledMarketplaceHeaderPath(content_root, title_id, package_path));
+             InstalledMarketplaceHeaderPath(content_root, title_id, package_path), ec);
 }
 
 std::vector<std::filesystem::path> DiscoverDlcSourceDirectories(
@@ -1160,9 +1163,21 @@ std::set<std::string> Skate3BaseApp::DiscoverRecipeAliases(
   static constexpr std::string_view kPrefix = "data/content/recipe/";
 
   std::set<std::string> aliases;
+  // Step with increment(ec): operator++ throws on a mid-scan error (KI-19).
   std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(content_root, ec)) {
-    if (ec || !entry.is_regular_file() || entry.path().extension() != ".big") {
+  std::filesystem::directory_iterator it(content_root, ec);
+  for (;; it.increment(ec)) {
+    if (ec) {
+      REXLOG_WARN("Could not scan Skate 3 content folder {} for recipe aliases: {}",
+                  content_root.string(), ec.message());
+      break;
+    }
+    if (it == std::filesystem::directory_iterator()) {
+      break;
+    }
+    const auto& entry = *it;
+    std::error_code entry_ec;
+    if (!entry.is_regular_file(entry_ec) || entry.path().extension() != ".big") {
       continue;
     }
 
@@ -1220,9 +1235,15 @@ void Skate3BaseApp::InstallRecipeOverlay() {
   }
 
   const auto content_root = runtime()->game_data_root() / "data" / "content";
-  if (!std::filesystem::exists(content_root)) {
-    REXLOG_WARN("Skipping Skate 3 recipe VFS overlay; content root not found: {}",
-                content_root.string());
+  std::error_code exists_ec;
+  if (!std::filesystem::exists(content_root, exists_ec)) {
+    if (exists_ec) {
+      REXLOG_WARN("Skipping Skate 3 recipe VFS overlay; could not access content root {}: {}",
+                  content_root.string(), exists_ec.message());
+    } else {
+      REXLOG_WARN("Skipping Skate 3 recipe VFS overlay; content root not found: {}",
+                  content_root.string());
+    }
     return;
   }
 
@@ -1337,18 +1358,55 @@ void Skate3BaseApp::InstallDlcPackages() {
   size_t skipped_count = 0;
 
   for (const auto& source_dir : source_dirs) {
-    if (!std::filesystem::is_directory(source_dir)) {
+    std::error_code status_ec;
+    const auto source_status = std::filesystem::status(source_dir, status_ec);
+    if (!std::filesystem::is_directory(source_status)) {
+      if (status_ec && source_status.type() != std::filesystem::file_type::not_found) {
+        REXLOG_WARN("Could not access Skate 3 DLC folder {}: {}", source_dir.string(),
+                    status_ec.message());
+      }
       continue;
     }
 
+    // Step with increment(ec): operator++ throws on a mid-scan error, e.g. a
+    // subfolder without read access, which used to end startup (KI-19). The
+    // standard library ends the iteration on any such error, so each
+    // subfolder is probed before recursing and an unreadable one is skipped
+    // with a warning instead of losing the rest of the folder.
     std::error_code iter_ec;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(source_dir, iter_ec)) {
+    std::filesystem::recursive_directory_iterator it(source_dir, iter_ec);
+    for (;; it.increment(iter_ec)) {
       if (iter_ec) {
         REXLOG_WARN("Could not scan Skate 3 DLC folder {}: {}", source_dir.string(),
                     iter_ec.message());
         break;
       }
-      if (!entry.is_regular_file()) {
+      if (it == std::filesystem::recursive_directory_iterator()) {
+        break;
+      }
+      const auto& entry = *it;
+
+      std::error_code entry_ec;
+      if (it.recursion_pending() && entry.is_directory(entry_ec) &&
+          !entry.is_symlink(entry_ec)) {
+        std::error_code probe_ec;
+        std::filesystem::directory_iterator probe(entry.path(), probe_ec);
+        if (probe_ec) {
+          REXLOG_WARN("Skipping unreadable Skate 3 DLC subfolder {}: {}", entry.path().string(),
+                      probe_ec.message());
+          it.disable_recursion_pending();
+        }
+        continue;
+      }
+
+      entry_ec.clear();
+      const bool is_file = entry.is_regular_file(entry_ec);
+      if (entry_ec) {
+        REXLOG_WARN("Skipping unreadable Skate 3 DLC candidate {}: {}", entry.path().string(),
+                    entry_ec.message());
+        continue;
+      }
+      if (!is_file) {
         continue;
       }
 
@@ -1356,7 +1414,11 @@ void Skate3BaseApp::InstallDlcPackages() {
       std::error_code canonical_ec;
       auto package_key = std::filesystem::weakly_canonical(package_path, canonical_ec).string();
       if (canonical_ec) {
-        package_key = std::filesystem::absolute(package_path).string();
+        std::error_code absolute_ec;
+        package_key = std::filesystem::absolute(package_path, absolute_ec).string();
+        if (absolute_ec) {
+          package_key = package_path.string();
+        }
       }
       if (!seen_packages.insert(package_key).second) {
         continue;

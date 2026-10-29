@@ -77,15 +77,6 @@ repro steps; the entry says where the problem is and how it would show.
   suppressed or failing, its resolve may be lost, or the recomp may break a
   CPU-side step.
 
-### KI-17: Texture routing maps grow without bound
-
-- **Status:** open · **Severity:** low–medium · was BT-10
-- **Area:** native renderer, texture cache
-- **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
-  `tex_pending_first` are only cleared by the debug cache flush, so they grow
-  for the whole session.
-- **Fix idea:** prune by `last_used_frame`, like `tex_store`.
-
 ### KI-18: Draw-distance slots never freed; LOD distances scaled in place
 
 - **Status:** open · **Severity:** low–medium · was BT-11
@@ -95,16 +86,6 @@ repro steps; the entry says where the problem is and how it would show.
   draw-distance scaling silently stops once enough cull objects have been
   seen. LOD distances are multiplied in place every frame, which relies on the
   game rewriting them each frame.
-
-### KI-19: DLC and recipe directory scans can throw at startup
-
-- **Status:** open · **Severity:** low–medium · was BT-12
-- **Area:** app startup
-- **Where:** `src/skate3_app_common.cpp`
-- **Problem:** the DLC and recipe scans use the non-throwing iterator
-  constructor, but `operator++` can still throw (for example on a permissions
-  error partway through a folder), which would end startup with an exception.
-- **Fix:** step with `increment(ec)`.
 
 ### KI-20: Depth-view caches compare textures by pointer
 
@@ -1162,6 +1143,62 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** add a "Quit Game" row after the PC settings rows on the root
   Options screen, with a confirmation popup (the popup-id mechanism from #40).
   Exit through the same clean path as Close Game.
+- **Tracking update:** rubensteezy/skate3recomp#52, awaiting in-game test.
+
+### KI-98: B doesn't dismiss the Options menu's custom popups
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu
+- **Tracking:** none yet. Found while building KI-97 (#52).
+- **Where:** the `sub_8260EA48` hook in `src/skate3_options_menu.cpp`, and the
+  popup manager's input path near `sub_825EF698`.
+- **Problem:** pressing B while the quit prompt is up does nothing, and no
+  callback fires. The restart prompt (#40) probably behaves the same, and the
+  KI-28 tests found it is A-only. #52 puts Cancel first so the highlighted
+  button is the safe one.
+- **Next step:** find how the popup manager handles B, if B-to-cancel is wanted.
+
+### KI-99: The pause menu's Options tab has no quit item
+
+- **Status:** open (feature idea) · **Severity:** low
+- **Area:** pause menu
+- **Tracking:** none yet. Raised while building KI-97 (#52).
+- **Where:** the pause menu (the "crossbar"). Its Options tab (gear) lists Game
+  Settings, Music Player, Extras and Sign in to EA Nation. The item table is
+  around `0x830275A0`, in 20-byte entries {name, title ID, icon, int, helper ID}.
+  It already has an `ExitDemo` entry at `0x830278C8` (`ID_DEMO_EXIT` "Exit
+  Demo", icon "quit"), used only by the trial build.
+- **Idea:** a Quit item after Sign in to EA Nation, reusing #52's prompt and
+  `CloseGame()`, would be one step quicker than Options > Game Settings >
+  Quit Game.
+
+### KI-100: The root Options rows are cut off in a small window
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu, layout
+- **Tracking:** none yet. Found while building KI-97 (#52).
+- **Problem:** in a 1294x758 window, the Quit Game row (the seventh added row) is
+  half off the bottom of the screen. Fullscreen is probably fine.
+- **Next step:** check whether the game's list scrolls. If not, consider
+  grouping the PC rows under one entry.
+
+### KI-101: Distant pop-in during free roam
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming / LOD
+- **Tracking:** none yet. Seen by the user while testing KI-21 (#33) on
+  2026-10-28.
+- **Symptom:** objects pop in at a distance while skating, noticed with
+  Ambient Occlusion off (D3D12, 4K, MSAA 8x). On Vulkan, a nearby bike rack
+  also pops in as the skater passes it.
+- **Ruled out:** the occlusion cull. Both the distant pop-in (D3D12) and the
+  bike rack (Vulkan) stayed with
+  `--skate3_native_render_scene_occlusion_cull=false`.
+- **Not yet checked:** whether it also shows with AO on, on the emulated
+  renderer (F5), or with a different draw distance. It may be the game's own
+  streaming/LOD distance rather than a native-renderer bug.
+- **Next step:** compare the same route on F5 and at a higher
+  `skate3_draw_distance_scale` (see KI-18, #30).
 
 ## Resolved
 
@@ -1695,6 +1732,59 @@ repro steps; the entry says where the problem is and how it would show.
   settings-overlay blur (`menu_blur_tex`, Esc/F1) needs a key press and was
   not exercised.
 - **In-game test (2026-10-28):** user on D3D12, 4K fullscreen: five F6 presses within one second saved five files with distinct millisecond stamps (shot_20261028_211526_110 to _760); the Esc settings overlay and the pause-menu popup blur looked correct each time. The HDR-toggle recreate path was not exercised (the output format is fixed today).
+
+### KI-17: Texture routing maps grew without bound
+
+- **Status:** fixed in rubensteezy/skate3recomp#29, tested in-game on 2026-10-28 · **Severity:** low–medium · was BT-10
+- **Area:** native renderer, texture cache
+- **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
+  `tex_pending_first` were only cleared by the debug cache flush, so they grew
+  for the whole session.
+- **Fix:** every entry is stamped with `last_used_frame` when it is used, and
+  `PruneTexRouting` (in `skate3_native_scene_gpu.cpp`, run right after
+  `EvictTexStore`) sweeps the maps every 120 frames with the store LRU's idle
+  guard (45 s of wall-clock time, never less than 8× the detail-downgrade
+  hold). An idle route or sticky site is only dropped once its words key has
+  no valid decode in the store, because then it serves the same thing a fresh
+  entry would. Anything idle for 5 minutes goes regardless. An entry used this
+  frame is never dropped, so the Edit Skater piece-signature hold (KI-2) and
+  the streaming sticky serving (KI-1) keep their state while it matters.
+- **Stats:** the `native-scene: tex routing pruned N (routes= sticky=
+  words_sticky= pending_first= store=)` line logs at most once a minute when
+  something was pruned. The perf log line (`skate3_native_render_scene_perf_log`)
+  shows the sizes in `store[...]` too.
+- **In-game test (2026-10-28):** user on D3D12, 4K, about 5.5 minutes: free roam with streaming showed no texture flicker or swaps, the replay editor kept a normal frame rate, and skin-tone and clothing edits in Edit Skater showed no wrong textures. The log showed three prune passes (67, 1 and 151 entries) with routes holding at about 1,400 to 1,500; tex_sticky still grew slowly (18,284 to 19,270), so whether it plateaus over a long session is not yet shown.
+
+### KI-19: DLC and recipe directory scans can throw at startup
+
+- **Status:** fixed in rubensteezy/skate3recomp#31, tested in-game on 2026-10-28 · **Severity:** low–medium · was BT-12
+- **Area:** app startup
+- **Where:** `Skate3BaseApp::InstallDlcPackages`,
+  `Skate3BaseApp::DiscoverRecipeAliases` and `Skate3BaseApp::InstallRecipeOverlay`
+  (`src/skate3_app_common.cpp`), `skate3::shader_disasm::RunIfRequested`
+  (`src/skate3_shader_disasm.cpp`, dev tool)
+- **Problem:** the scans used the non-throwing iterator constructor inside a
+  range-for, but the range-for's `operator++` throws on any error partway
+  through a folder. The DLC scan is recursive, so a subfolder of a `dlc`
+  folder without read access threw `filesystem_error` out of startup. The
+  throwing `is_directory`, `is_regular_file` and `exists` calls around the
+  scans could do the same.
+- **Fix:** each loop steps with `increment(ec)` and logs a warning naming the
+  folder when it fails. The standard library ends the iteration on such an
+  error, so the DLC scan also probes each subfolder before recursing and skips
+  an unreadable one with `Skipping unreadable Skate 3 DLC subfolder ...`
+  instead of losing the rest of the folder. The status checks in and around
+  the loops use the `error_code` overloads. Nothing changes when no error
+  occurs. The installer and screenshot code have no directory scans.
+- **Tested:** relwithdebinfo, unattended boot (`--skate3_demo_path=true`)
+  with `--user_data_root=` on a scratch folder whose `dlc` holds an
+  unreadable subfolder (`icacls /deny %USERNAME%:(RX)`), a loose file after
+  it and a readable nested subfolder. The boot logged the skip warning for
+  the unreadable subfolder, still scanned the two files after it and reached
+  gameplay. With the deny removed it scanned all three files, no warning.
+  The recipe overlay logged 11 aliases, the same as earlier builds. Not yet
+  tested: a normal boot with real DLC installed.
+- **In-game test (2026-10-28):** user boot on D3D12 with an empty dlc folder: 'No Skate 3 DLC packages found', the BIG-directory VFS overlay installed with 11 aliases, gameplay prewarm decoded 3,144 meshes with 0 dropped, and Alt+F4 exited cleanly. Not tested with real DLC packages present (the user has none installed); the unreadable-subfolder path was covered by the unattended test.
 
 ### Reviewed and ruled out (code review)
 
