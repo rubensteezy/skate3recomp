@@ -1168,6 +1168,44 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** add a "Quit Game" row after the PC settings rows on the root
   Options screen, with a confirmation popup (the popup-id mechanism from #40).
   Exit through the same clean path as Close Game.
+- **Tracking update:** rubensteezy/skate3recomp#52, awaiting in-game test.
+
+### KI-98: B doesn't dismiss the Options menu's custom popups
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu
+- **Tracking:** none yet. Found while building KI-97 (#52).
+- **Where:** the `sub_8260EA48` hook in `src/skate3_options_menu.cpp`, and the
+  popup manager's input path near `sub_825EF698`.
+- **Problem:** pressing B while the quit prompt is up does nothing, and no
+  callback fires. The restart prompt (#40) probably behaves the same, and the
+  KI-28 tests found it is A-only. #52 puts Cancel first so the highlighted
+  button is the safe one.
+- **Next step:** find how the popup manager handles B, if B-to-cancel is wanted.
+
+### KI-99: The pause menu's Options tab has no quit item
+
+- **Status:** open (feature idea) · **Severity:** low
+- **Area:** pause menu
+- **Tracking:** none yet. Raised while building KI-97 (#52).
+- **Where:** the pause menu (the "crossbar"). Its Options tab (gear) lists Game
+  Settings, Music Player, Extras and Sign in to EA Nation. The item table is
+  around `0x830275A0`, in 20-byte entries {name, title ID, icon, int, helper ID}.
+  It already has an `ExitDemo` entry at `0x830278C8` (`ID_DEMO_EXIT` "Exit
+  Demo", icon "quit"), used only by the trial build.
+- **Idea:** a Quit item after Sign in to EA Nation, reusing #52's prompt and
+  `CloseGame()`, would be one step quicker than Options > Game Settings >
+  Quit Game.
+
+### KI-100: The root Options rows are cut off in a small window
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu, layout
+- **Tracking:** none yet. Found while building KI-97 (#52).
+- **Problem:** in a 1294x758 window, the Quit Game row (the seventh added row) is
+  half off the bottom of the screen. Fullscreen is probably fine.
+- **Next step:** check whether the game's list scrolls. If not, consider
+  grouping the PC rows under one entry.
 
 ## Resolved
 
