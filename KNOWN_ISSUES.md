@@ -92,15 +92,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Fix idea:** gate each slot on `CompletedSubmission()`, or size the rings
   from the device's frames in flight.
 
-### KI-17: Texture routing maps grow without bound
-
-- **Status:** open · **Severity:** low–medium · was BT-10
-- **Area:** native renderer, texture cache
-- **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
-  `tex_pending_first` are only cleared by the debug cache flush, so they grow
-  for the whole session.
-- **Fix idea:** prune by `last_used_frame`, like `tex_store`.
-
 ### KI-18: Draw-distance slots never freed; LOD distances scaled in place
 
 - **Status:** open · **Severity:** low–medium · was BT-11
@@ -151,13 +142,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Problem:** the shadow-dump readback buffers keep their first size after a
   shadow tile change, so a later recording copies out of bounds on the GPU.
 
-### KI-23: OnShutdown misses several UnregisterBind calls
-
-- **Status:** open · **Severity:** low · was BT-16
-- **Where:** `src/skate3_app_common.cpp`
-- **Problem:** the screenshot bind (which captures `this`), the F5 toggle,
-  showcase and freecam binds are never unregistered on shutdown.
-
 ### KI-24: XUID parsing and TOML escaping in user settings
 
 - **Status:** open · **Severity:** low · was BT-17
@@ -187,45 +171,11 @@ repro steps; the entry says where the problem is and how it would show.
   host over-read on a malformed declaration), and several `Map()` results
   aren't checked for null.
 
-### KI-28: Options menu edge cases
-
-- **Status:** open · **Severity:** low · was BT-21
-- **Where:** `src/skate3_options_menu.cpp`
-- **Problem:** `StepRow` takes `% count` with no guard for an empty label
-  list. `g_restart_popup_open` can be left set if the popup closes by a path
-  other than its callback.
-
 ### KI-29: Icon updater leaves `.icon-new` behind
 
 - **Status:** open · **Severity:** low · was BT-22
 - **Where:** `src/skate3_win_icon.cpp`
 - **Problem:** a failed swap leaves the `.icon-new` file in place.
-
-### KI-30: F12 dialog rewrites a cvar the render thread overrides
-
-- **Status:** open · **Severity:** low · was BT-23
-- **Where:** `src/skate3_native_debug_dialog.cpp`
-- **Problem:** `native_render_suppress_emulated_draws` is read and written back
-  every UI frame, which can clobber the render thread's temporary override
-  (see KI-11). Other sliders the render thread touches follow the same pattern.
-- **Fix:** only call `REXCVAR_SET` when the widget reports a change.
-
-### KI-31: C++ tests not built, no CI
-
-- **Status:** open · **Severity:** low · was BT-24
-- **Problem:** `tests/*.cpp` (character fade, Hall of Meat, screen FX) aren't
-  wired into CMake, and they use `assert`, which does nothing in release
-  builds. This repository has no CI, so neither these nor the Python tests
-  (`python -m unittest discover -s tests`) run automatically.
-
-### KI-32: Small cleanups
-
-- **Status:** open · **Severity:** low · was BT-25
-- **Problems:**
-  - Screenshots taken within the same second get the same filename.
-  - `blur_tex` isn't recreated when the output format changes.
-  - The `kSceneRingFrames` comment says about 900, but the value is 2400.
-  - The header declaring `MaybeDumpSceneRing` is missing includes.
 
 ### KI-37: Dead code for building without Title Update 3
 
@@ -278,28 +228,6 @@ repro steps; the entry says where the problem is and how it would show.
   records the 2D draws with their inline vertex data. Decode the 32-byte
   vertices, compare with F5, then add the layout to `Publish2dDraws`.
 
-### KI-38: Frames-in-flight limit may skip frames only the native renderer draws
-
-- **Status:** open (unconfirmed) · **Severity:** low–medium
-- **Area:** SDK command processor, frame pacing
-- **Tracking:** none yet. Found while fixing KI-16 (#28).
-- **Where:** rexglue-sdk `src/graphics/d3d12/command_processor.cpp`,
-  `EndSubmission`. It sets `is_closing_frame = is_swap && frame_open_`, and
-  only a closed frame enters the `kQueueFrames` = 3 wait in
-  `BeginSubmission`. The Vulkan command processor has the same pattern with
-  `kMaxFramesInFlight` = 3.
-- **Problem:** if the native frame's `EndSubmission(true)` runs with no frame
-  open (for example with guest draws suppressed), nothing limits how far the
-  GPU falls behind. Input latency would grow and the upload rings would run
-  out of free regions. The #28 log line "upload ring <name>: all N regions in
-  flight" would then appear.
-- **Evidence:** the code path only, not checked at runtime. The bone-ring
-  comment in `skate3_native_scene_gpu_internal.h` records the Vulkan GPU
-  running more than 3 frames behind, which would fit.
-- **Next step:** log `frame_open_` at the native `EndSubmission(true)` on both
-  backends during gameplay. If it is false, open the frame in
-  `NativeRhiBeginFrame`.
-
 ### KI-39: The native RHI has no way to wait on a GPU submission
 
 - **Status:** open · **Severity:** low
@@ -316,6 +244,9 @@ repro steps; the entry says where the problem is and how it would show.
   `CheckSubmissionFence` / `CheckSubmissionFenceAndDeviceLoss`. That needs an
   SDK-fork PR plus an "sdk: bump" commit. `UploadRingRegions::Acquire` can
   then wait, with a rate-limited log, instead of racing.
+- **Lower priority (from KI-38, #49):** frames in flight never exceed 3 on
+  either backend, even when GPU-bound. With #28's 8 regions, the fallback
+  that would need this wait can't trigger in normal operation.
 
 ### KI-40: Photo FX constant slots have no bounds check
 
@@ -505,6 +436,9 @@ repro steps; the entry says where the problem is and how it would show.
 - **Likely cause (from KI-28, #40):** in the current build, LB, LT and RT don't
   change pause-menu tabs; d-pad left/right does. The help text's map-switch
   example uses `rt` for tabs.
+- **Seen again (KI-41, #51):** with the documented string
+  `start,a,rt:1500,rt:1500,down,down,a,down,down,down,down,down,a,a`, the skater
+  stayed in the plaza, standing off the board, and no map change happened.
 - **Next step:** update the example to use d-pad left/right, check that it
   reaches a map change (signed in, if that's needed), and fix the help text.
 
@@ -939,19 +873,322 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** keep unusable entries unchanged on save, or back the file up
   the first time anything is dropped.
 
-### KI-81: `path.string()` may throw on non-ASCII user paths
+### KI-81: Non-ASCII paths are mis-decoded, and `path.string()` may throw on them
+
+- **Status:** open (mis-decoding confirmed; throwing unverified) ·
+  **Severity:** low–medium
+- **Area:** SDK app startup, settings, app logging
+- **Tracking:** none yet. Found while fixing KI-59 (#45); confirmed while
+  fixing KI-46 (#46).
+- **Problems:**
+  - **Mis-decoding (confirmed):** the SDK's path setup in `src/ui/rex_app.cpp`
+    assigns a UTF-8 `std::string` straight to `std::filesystem::path`
+    (`user_dir = user_data_cvar;`). Windows reads that as the ANSI code page.
+    The same pattern is used for `game_data_root`, `cache_root`,
+    `update_data_root` and the settings.toml path values. With
+    `--user_data_root=...\na_Jiří_日本` the game booted, but all user data
+    (cache, dlc, settings.toml) went into a mojibake folder
+    `na_JiÅ™Ã­_æ—¥æœ¬`, and the intended folder stayed empty. The log still
+    shows the right name.
+  - **Throwing (unverified):** `std::filesystem::path::string()` converts to the
+    ANSI code page and can throw for characters outside it. The SDK passes it
+    to `toml::parse_file` in `ReXApp::SetupEnvironment`,
+    `ConfigFileContainsAnyKey` and `SaveConfigValues`. The game's own `src/`
+    has 52 more `.string()` calls across 9 files, many in log lines on user
+    paths: the DLC scan, "Skate 3 saves: using portable folder", and
+    `content_root.string()` in `InstallRecipeOverlay`. These are reachable
+    through the default AppData path (a non-ASCII Windows username) or a
+    portable install folder, so they could crash startup for those users.
+- **Next step:** in the SDK, build these paths with `rex::to_path(utf8)` and
+  replace `.string()` with UTF-8 conversion (SDK-fork PR plus an "sdk: bump"
+  commit). In the game, sweep `src/` to `rex::path_to_utf8`. Then test with a
+  portable install in a non-ASCII folder.
+
+### KI-82: Persistent shader storage is disabled on long user-data paths
+
+- **Status:** open · **Severity:** low
+- **Area:** SDK D3D12 pipeline cache
+- **Tracking:** none yet. Found while fixing KI-46 (#46).
+- **Where:** `InitializeShaderStorage` in rexglue-sdk
+  `src/graphics/d3d12/pipeline_cache.cpp`.
+- **Problem:** with a 218-character user-data root, it logged "Failed to open
+  the Direct3D 12 pipeline description storage file for writing, persistent
+  shader storage will be disabled". The storage file path was about
+  290 characters. The game runs, but shaders recompile on every boot. Vulkan
+  wasn't checked.
+- **Next step:** use `\\?\` paths for the cache root in the SDK, the way #46
+  does for the overlay. Adding `longPathAware` to `src/skate3_app.manifest`
+  only helps where the LongPathsEnabled policy is set.
+
+### KI-83: Saves may fail on long user-data paths
+
+- **Status:** open (code reading only) · **Severity:** low–medium
+- **Area:** SDK content, saves
+- **Tracking:** none yet. Found while fixing KI-46 (#46).
+- **Where:** `ContentManager::ResolvePackagePath` builds
+  `<root>\<xuid 16>\<title 8>\<type 8>\<name>\...` with plain paths, and
+  `HostPathEntry::CreateEntryInternal` and the file opens use no `\\?\`
+  prefix.
+- **Problem:** a long AppData or portable path would hit MAX_PATH at a slightly
+  shorter root than the overlay did, so career saves could fail to write.
+- **Next step:** give content roots the same `\\?\` treatment in the SDK, then
+  run a save test on a long root.
+
+### KI-84: MAX_PATH buffers truncate long exe and file-dialog paths
+
+- **Status:** open (code reading only) · **Severity:** low
+- **Area:** app, installers
+- **Tracking:** none yet. Found while fixing KI-46 (#46). See also KI-73.
+- **Where:**
+  - `Skate3BaseApp::RestartGame` (`src/skate3_app_common.cpp`):
+    `GetModuleFileNameW` with a MAX_PATH buffer. On truncation it doesn't
+    return 0, so `CreateProcessW` gets a cut path, the restart fails, and the
+    log is misleading.
+  - `PickIsoFile` (`src/skate3_iso_installer.cpp`) and `PickTitleUpdateFile`
+    (`src/skate3_title_update_installer.cpp`): MAX_PATH file-dialog buffers,
+    so picking a file deeper than 260 characters fails.
+- **Fix:** use the SDK's `rex::filesystem::GetExecutablePath()`, which already
+  handles long paths, and bigger dialog buffers.
+
+### KI-85: Dropping a speculative prewarm entry clears a live miss's in-flight key
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming
+- **Tracking:** none yet. Found while fixing KI-65 (#47).
+- **Where:** the `if (dropped)` branch of `ProcessPrewarmEntry` in
+  `src/skate3_native_scene_gpu.cpp`.
+- **Problem:** it calls `g_miss_inflight_mesh.erase(e.mesh)` without checking
+  `e.miss`. When a speculative entry for mesh X is dropped while a miss for X
+  is still in flight, the miss's key is cleared, and the draw path can queue
+  a second decode of X. That wastes worker time but has no visual effect.
+- **Fix:** erase only when `e.miss` is set.
+
+### KI-86: The prewarm miss queue pops from the front of a vector
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming performance
+- **Tracking:** none yet. Found while fixing KI-65 (#47).
+- **Where:** `PrewarmWorkerLoop` in `src/skate3_native_scene_gpu.cpp`, and
+  `skate3_native_scene_state.h`.
+- **Problem:** `g_miss_queue.erase(g_miss_queue.begin())` costs time in
+  proportion to the queue length (capped at 65536) while `g_prewarm_mutex` is
+  held, so a large streaming burst could stall the workers. `g_dyn_jobs` has
+  the same pattern.
+- **Also:** the null base/device re-queue in `PrewarmWorkerLoop` is close to
+  dead code (the workers start only once `g_r.device` is set, and nothing
+  resets it). It never decrements retries, so if it ever ran for long it
+  would spin entries every 100 ms per worker without end.
+- **Next step:** switch both queues to `std::deque` if a profile shows lock
+  contention. Turn the null re-queue into a plain wait.
+
+### KI-87: Raw guest loads in the `CaptureDynamicState` pre-check
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-64 (#48). The biggest remaining
+  risk of the KI-64 kind.
+- **Where:** the world-path pre-check of `CaptureDynamicState` in
+  `src/skate3_native_scene.cpp`, called about 800 times a frame from
+  `OnSceneDrawList`. It reads `ctx → record → mesh → vdesc` and the vertex
+  elements raw (`REX_LOAD_U32(ctx)`, `REX_LOAD_U32(record)`,
+  `REX_LOAD_U16(vdesc + 8)` and others). Further down, `ctx + kCtxEffectList`
+  and `effect_list + kEffectListPassCount` are raw too.
+- **Problem:** a stale pointer there crashes the guest render thread, the same
+  way as KI-64.
+- **Fix:** reuse one ctx-head guarded copy, as #48's `BuildItemGeometry` does,
+  and measure the cost the same way #48 did.
+
+### KI-88: Remaining raw guest loads elsewhere in capture (low risk)
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-64 (#48).
+- **Where** (`src/skate3_native_scene.cpp` unless noted):
+  - `CaptureClothDraw`: `vb_obj + 0x18/0x20`.
+  - The neighbour read in `ComputeItemFingerprint`:
+    `mix(REX_LOAD_U64(addr + off))`.
+  - `OnSetViewport` and `OnSetScissor`.
+  - The `REX_LOAD_U8(obj + 0x54 + k)` shader-name loops.
+  - The `device + 0x480` fetch-constant reads.
+- **Problem:** the same fault risk as KI-64, but most of these read device or
+  current-draw state, so the risk is low.
+- **Also:**
+  - `GuestReadableApprox` only checks `addr >= 0x10000` (its `base` argument
+    is unused), but its name suggests a real readability check.
+  - `OnSceneDrawList` and `FilterSceneDrawList` (`src/skate3_native_render.cpp`)
+    both copy the same sort-list segment per dispatch. The cost is
+    negligible.
+- **Next step:** no code change until a crash points at one of these. Rename or
+  document `GuestReadableApprox`. Optionally, pass the captured segment to
+  the filter.
+
+### KI-89: Raw writes through just-read pointers in the auto-exposure hook
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, guest memory safety
+- **Tracking:** none yet. Found while fixing KI-64 (#48).
+- **Where:** `sub_827F0D00` in `src/skate3_native_render.cpp`:
+  `REX_STORE_U32(inst_a + 48 / inst_b + 56)`.
+- **Problem:** these write through pointers read a moment earlier. A stale
+  instance pointer would be a write fault, or would corrupt guest memory if
+  the page has been reused.
+- **Next step:** low priority. Check `inst_a` / `inst_b` against a guarded read
+  of their vtable or type before the stores.
+
+### KI-90: The bone-ring comment blames the wrong cause for hair shimmer
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, characters
+- **Tracking:** none yet. Found while checking KI-38 (#49).
+- **Where:** the `RendererState::kBoneRegions` comment in
+  `src/skate3_native_scene_gpu_internal.h`.
+- **Problem:** it blames hair shimmer and collapsed garments on the Vulkan GPU
+  running more than 3 frames behind, which is why the ring is 8 deep. #49
+  measured that frames never go past 3 on either backend. Submissions do:
+  Vulkan reached 6 in flight while loading, because there are several per
+  frame. A ring keyed by frame number with 4 or more regions is never reused
+  while the GPU still reads it, so that corruption had another cause.
+- **Also:** #28's "K/N regions in flight" and "all N regions in flight" upload
+  ring lines can't fire in normal operation for the same reason. Consider
+  lowering their threshold to "more than 3".
+- **Next step:** if the shimmer comes back, look for a `RenderScene` that runs
+  more than once per `g_frames_rendered` value, or at the ROPA generation
+  ring. Then fix the comment.
+
+### KI-91: Frame rate is uncapped by default
+
+- **Status:** open (decision) · **Severity:** low
+- **Area:** settings defaults
+- **Tracking:** none yet. Noticed while checking KI-38 (#49).
+- **Problem:** the SDK `vsync` cvar defaults to false, and at default settings
+  both backends ran at about 4.4 ms per frame (about 225 fps). That may cost
+  power and heat for no benefit, especially on laptops.
+- **Next step:** decide whether release defaults should turn on vsync or a
+  frame cap. Settings > Display already has Framerate Cap and V-Sync rows.
+
+### KI-92: `ScoreRigidAffine` has no in-front-of-camera check
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, player garments
+- **Tracking:** none yet. Found while fixing KI-61 (#50).
+- **Where:** `ScoreRigidAffine` in `src/skate3_native_scene.cpp`.
+- **Problem:** its strict count accepts a sample when `|x|` and `|y|` are within
+  1.5·|w|, without requiring `clip[3] > 0`. So a matrix that places the
+  garment behind the camera can still score well. `RefinePaletteBase` has
+  that check, and its comment explains it exists for exactly this case. The
+  structural tail-row check on the matrix block reduces the risk.
+- **Fix:** add `clip[3] > 0.0f` to the strict count, then re-test the player's
+  tee (Ropa, sim active) up close.
+
+### KI-93: Character shadows may be cut off at the edges on 32:9 ultrawide
 
 - **Status:** open (unverified) · **Severity:** low–medium
-- **Area:** SDK app startup, settings
-- **Tracking:** none yet. Found while fixing KI-59 (#45).
-- **Where:** rexglue-sdk `ReXApp::SetupEnvironment`, `ConfigFileContainsAnyKey`
-  and `SaveConfigValues`, which pass `path.string()` to `toml::parse_file`.
-- **Problem:** on Windows, `std::filesystem::path::string()` converts to the
-  ANSI code page and can throw for characters outside it. A user folder like
-  `C:\Users\Jiří` or one in a CJK script could make startup or settings saves
-  throw. #45's new code uses UTF-8 paths and avoids this.
-- **Next step:** test with a non-ASCII `--user_data_root`. If it throws, switch
-  those calls to `path.u8string()` or a wide-path open.
+- **Area:** ultrawide, shadows
+- **Tracking:** none yet. Raised while fixing KI-61 (#50).
+- **Problem:** at 32:9, the game's sun-shadow bank puts characters in the side
+  bands at |x|/w up to about 2.0; at 16:9 that never passes 1.5. So the
+  game's shadow projection seems to be fitted to the 16:9 view only, and
+  shadows of characters or cars near the far edges may be missing or cut
+  off.
+- **Next step:** at 32:9, compare character and car shadows at the far edges
+  with the centre. If they're missing, check which projection the native
+  shadow atlas uses, and whether it can be widened the way the cull frustum
+  is.
+
+### KI-94: Demo-path inputs can't move the camera
+
+- **Status:** open · **Severity:** low
+- **Area:** test tooling
+- **Tracking:** none yet. Found while testing KI-61 (#50).
+- **Where:** `skate3_demo_path_gameplay_inputs` in `src/skate3_demo_path.cpp`.
+- **Problem:** it only takes button tokens, no sticks, so unattended runs
+  can't pan the camera or put characters at the screen edges on purpose.
+  That limited the testing of KI-25 (#37) and KI-61 (#50).
+- **Fix:** add stick tokens, for example `rs_left:ms` and `ls_up:ms`.
+
+### KI-95: Shadow-atlas casters don't stamp their mesh entries
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** native renderer, shadows, mesh cache
+- **Tracking:** none yet. Found while fixing KI-41 (#51). The same kind of bug
+  as KI-41, for meshes.
+- **Where:** the caster loop of `RenderShadowAtlas` in
+  `src/skate3_native_scene_gpu.cpp`. It checks `g_r.meshes.contains(item.mesh)`
+  and later does `g_r.meshes.find(...)`, but never sets the mesh's
+  `last_used_frame`. `RenderStaticSunMap` does
+  (`mit->second.last_used_frame = frame_number`).
+- **Problem:** under mesh-store pressure
+  (`skate3_native_render_scene_mesh_store_mb`), the mesh of a caster the main
+  pass doesn't draw can be evicted. The caster then silently drops out of the
+  shadow, because the pass `continue`s on a missing mesh.
+- **Evidence:** a temporary counter found 5,995 to 25,377 caster-frames per
+  150 s run whose mesh hadn't been stamped for more than 5 s. No mesh was
+  actually skipped, because the 1024 MB mesh budget was never under pressure.
+- **Fix:** stamp `mit->second.last_used_frame` in the atlas loop, then test with
+  a small mesh budget.
+
+### KI-96: The texture store budget can't go below 256 MB for testing
+
+- **Status:** open · **Severity:** low
+- **Area:** test tooling
+- **Tracking:** none yet. Found while fixing KI-41 (#51).
+- **Where:** the `.range(256, 16384)` on `skate3_native_render_scene_tex_store_mb`
+  in `src/skate3_native_scene.cpp`, and `std::max(256, …)` in `EvictTexStore`.
+- **Problem:** the floor is enforced twice. A light area's working set is
+  about 225 MB, so at 256 MB the LRU never starts, and reproducing store
+  pressure there needs a code change.
+- **Next step:** if testing at low budgets matters, lower the floor for dev
+  builds or add a debug cvar.
+
+### KI-97: No way to quit from the game's own menus in fullscreen
+
+- **Status:** open (feature request)
+- **Area:** Options menu, app exit
+- **Tracking:** agent working on it (user request, 2026-10-28).
+- **Symptom:** in fullscreen there's no window X. A controller player can quit
+  only through the Esc overlay's Close Game. The game's own Options menu has
+  no quit option.
+- **Next step:** add a "Quit Game" row after the PC settings rows on the root
+  Options screen, with a confirmation popup (the popup-id mechanism from #40).
+  Exit through the same clean path as Close Game.
+- **Tracking update:** rubensteezy/skate3recomp#52, awaiting in-game test.
+
+### KI-98: B doesn't dismiss the Options menu's custom popups
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu
+- **Tracking:** none yet. Found while building KI-97 (#52).
+- **Where:** the `sub_8260EA48` hook in `src/skate3_options_menu.cpp`, and the
+  popup manager's input path near `sub_825EF698`.
+- **Problem:** pressing B while the quit prompt is up does nothing, and no
+  callback fires. The restart prompt (#40) probably behaves the same, and the
+  KI-28 tests found it is A-only. #52 puts Cancel first so the highlighted
+  button is the safe one.
+- **Next step:** find how the popup manager handles B, if B-to-cancel is wanted.
+
+### KI-99: The pause menu's Options tab has no quit item
+
+- **Status:** open (feature idea) · **Severity:** low
+- **Area:** pause menu
+- **Tracking:** none yet. Raised while building KI-97 (#52).
+- **Where:** the pause menu (the "crossbar"). Its Options tab (gear) lists Game
+  Settings, Music Player, Extras and Sign in to EA Nation. The item table is
+  around `0x830275A0`, in 20-byte entries {name, title ID, icon, int, helper ID}.
+  It already has an `ExitDemo` entry at `0x830278C8` (`ID_DEMO_EXIT` "Exit
+  Demo", icon "quit"), used only by the trial build.
+- **Idea:** a Quit item after Sign in to EA Nation, reusing #52's prompt and
+  `CloseGame()`, would be one step quicker than Options > Game Settings >
+  Quit Game.
+
+### KI-100: The root Options rows are cut off in a small window
+
+- **Status:** open · **Severity:** low
+- **Area:** Options menu, layout
+- **Tracking:** none yet. Found while building KI-97 (#52).
+- **Problem:** in a 1294x758 window, the Quit Game row (the seventh added row) is
+  half off the bottom of the screen. Fullscreen is probably fine.
+- **Next step:** check whether the game's list scrolls. If not, consider
+  grouping the PC rows under one entry.
 
 ## Resolved
 
@@ -1114,6 +1351,45 @@ repro steps; the entry says where the problem is and how it would show.
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
 
+### KI-31: C++ tests not built, no CI
+
+- **Status:** fix in review in rubensteezy/skate3recomp#43 · **Severity:**
+  low · was BT-24
+- **Tracking:** #43. CI: all five `tests` jobs pass on the PR (Python 24/24;
+  C++ 3/3 on Windows MSVC 19.51 and clang 22.1, Ubuntu clang 18.1 and
+  GCC 13.3).
+- **Problem:** `tests/*.cpp` (character fade, Hall of Meat, screen FX) weren't
+  wired into CMake, and they used `assert`, which does nothing in release
+  builds. This repository had no CI, so neither these nor the Python tests
+  (`python -m unittest discover -s tests`) ran automatically.
+- **Fix:**
+  - `tests/CMakeLists.txt` builds `character_fade_test`, `hall_of_meat_test`
+    and `screen_fx_test` and registers them with CTest (the `skate3_tests`
+    target builds all three). All three test header-only logic in
+    `src/native/` that includes only the standard library, so none was left
+    out and no stubs were needed.
+  - `-DSKATE3_TESTS_ONLY=ON` configures only the tests, with no SDK checkout,
+    game data, title update or codegen; `-DSKATE3_BUILD_TESTS=ON` adds them to
+    a normal configure. Commands are in CONTRIBUTING.md under Testing.
+  - `assert` is replaced by `CHECK` (`tests/test_check.h`), which runs in
+    every build type, reports each failed expression, and makes the test
+    exit nonzero.
+  - `.github/workflows/tests.yml` runs on pull requests and pushes to `main`:
+    the Python tests on Ubuntu, and the C++ tests with MSVC and clang on
+    Windows and clang and GCC on Ubuntu. It checks out no submodules.
+- **Checked locally:** Python tests (24) pass; all three C++ tests pass with
+  MSVC 19.51 (Release and Debug) and VS clang 22.1.3 (Release, Ninja), using
+  the workflow's own commands. A deliberately failing `CHECK` built with
+  `-DNDEBUG` exits 1.
+- **Candidates to add later:** KI-24's standalone round trip for
+  `src/skate3_user_settings.cpp` and KI-27's DecodeMesh validator test. Their
+  fixes (#36, #39) aren't on `main` yet and neither adds a test file, so
+  nothing is wired up for them here. #39's `src/native/mesh_decode_validate.h`
+  only includes the standard library, so its test can go straight into
+  `tests/CMakeLists.txt` once #39 merges. KI-24's parsing and escaping live in
+  `src/skate3_user_settings.cpp` next to SDK code and need moving into such a
+  header first.
+
 ### KI-33: Hook addresses not gated on Title Update 3
 
 - **Status:** fixed in rubensteezy/skate3recomp#27, tested in-game · was BT-26
@@ -1203,10 +1479,224 @@ repro steps; the entry says where the problem is and how it would show.
   `readback_resolve=none`, the emulated renderer would read the same stale
   memory (the SDK's targeted copy skips gameplay contexts). Not seen in play.
 
+### KI-38: Frames-in-flight limit may skip frames only the native renderer draws
+
+- **Status:** not a bug. No code change. Measured on `main` (f4d8500) with
+  temporary logging, unattended, on D3D12 and Vulkan.
+- **Suspicion:** rexglue-sdk's command processors only wait for a free frame
+  (`kQueueFrames` / `kMaxFramesInFlight` = 3, in `BeginSubmission`) when a
+  frame opens, and `EndSubmission` only closes a frame when `frame_open_` is
+  set. If the native frame's `EndSubmission(true)` ran with no frame open, the
+  GPU could fall any number of frames behind.
+- **Why it can't happen:** `IssueSwap` on both backends calls
+  `BeginSubmission(true)` before it calls the presenter's refresher ("in case
+  the swap command is the only one in the frame"), and the Vulkan refresher
+  calls it again. That opens the frame, and waits for the frame 3 back, even
+  when every guest draw is suppressed. The native renderer runs inside the
+  refresher, and nothing in the native RHI (`native_rhi_d3d12.cpp`,
+  `native_rhi_vulkan.cpp`) ends a submission, so the frame is still open when
+  the refresher's `EndSubmission(true)` closes it.
+- **Measured:** temporary logging at the native `EndSubmission(true)` on both
+  backends recorded `frame_open_` before the call and the frames whose closing
+  submission the real fence hadn't reached yet (D3D12 `GetCompletedValue`,
+  Vulkan `vkGetFenceStatus`). `--skate3_demo_path=true`, native renderer on,
+  about 100 s of each run in gameplay. #28's upload-ring code was applied on
+  top for the measurement.
+
+  | Run | Native frames | `frame_open_` false | Frames in flight (max) | Frame time |
+  |---|---|---|---|---|
+  | D3D12, defaults | 25,200 | 0 | 1 (99.8%), 2 (51 frames) | 4.4 ms |
+  | Vulkan, defaults | 26,400 | 0 | 1 (99.99%), 2 (1 frame) | 4.5 ms |
+  | D3D12, GPU-bound | 7,800 | 0 | 3 in gameplay, never 4 | 15.9 ms |
+  | Vulkan, GPU-bound | 9,600 | 0 | 3 in gameplay, never 4 | 12.9 ms |
+
+  GPU-bound runs added `--resolution_scale=6
+  --skate3_native_render_scene_msaa=8 --skate3_native_render_scene_ssr=true
+  --skate3_native_render_scene_ssr_steps=64
+  --skate3_native_render_scene_shafts_res=2
+  --skate3_native_render_scene_ssao_full_res=true`. The cap holds at exactly
+  3. #28's "upload ring <name>: K/N regions in flight" (logged at half the
+  8-region ring or more) and "all N regions in flight" lines never appeared.
+- **The "more than 3 frames behind" comment:** the bone-ring comment in
+  `skate3_native_scene_gpu_internal.h` most likely counted submissions, not
+  frames. Vulkan reached 6 submissions in flight while loading (several
+  submissions per frame) with frames still at 3 or fewer. A ring keyed by
+  frame number with 4 or more regions is never reused while the GPU reads it,
+  so the hair and garment corruption that comment describes had some other
+  cause.
+
+### KI-28: Options menu edge cases
+
+- **Status:** fixed in rubensteezy/skate3recomp#40, tested in-game on
+  2026-10-28 · **Severity:** low · was BT-21
+- **Where:** `src/skate3_options_menu.cpp`
+- **Problem:** `StepRow` took `% count` with no guard for an empty label
+  list (divide by zero), and the row value getter indexed `label_ids` with
+  whatever the row's getter returned. `g_restart_popup_open` was set when the
+  restart prompt opened and cleared only in its callback.
+- **Cause:** the prompt reuses the Video Calibration popup's callback
+  (`sub_8260EA48`), and the hook answered for the prompt whenever the bool
+  was set. A screen can close a popup by id without calling its callback
+  (`sub_82D0A628`), so the bool could stay set. The next Video Calibration
+  answer would then have been treated as the restart prompt's: its first
+  button would have applied the staged settings and restarted the game.
+- **Fix:** the popup manager returns an id for each popup and passes it to the
+  callback in r3, both for a button press (`sub_825EF698`) and when it flushes
+  all its popups (`sub_82D0A738`, button -2). The hook now stores the
+  prompt's id and answers only a callback carrying that id. Ids come from an
+  ever-increasing counter, so a stale one never matches. Whether the prompt is
+  open is read from the manager's popup queue (`PopupShown`), which also
+  stops a second Back from stacking another prompt. A flush keeps the staged
+  choices and the screen as they are. `StepRow` is a no-op for a row with no
+  labels (no sound, input not consumed). The value getters show nothing
+  for an out-of-range label. The number and string choice setters ignore
+  out-of-range indices.
+- **Tests:** a standalone check of the step and label logic (empty list,
+  wrap, out-of-range getters, popup-id matching) passes. In-game, driven by
+  `skate3_demo_path_gameplay_inputs` (Pause > Options tab > Game Settings >
+  Graphics, step MSAA, Back): the prompt shows ("restart prompt shown"), B
+  doesn't close it (it is A-only), Discard Changes logs button 1 and returns
+  to Game Settings, and the PC rows still step afterwards. Restart Now logs
+  button 0, applies the setting and relaunches. After a Discard, Video
+  Settings > Video Calibration still opens the game's own calibration
+  screens.
+- **In-game test (user, D3D12, 2026-10-28):** three restart prompts answered
+  with Discard, each returning the old value with rows still stepping. The
+  Video Calibration popup that followed was correctly left to the game.
+  Restart Now saved, exited cleanly and relaunched with MSAA 8x changed to 4x.
+  Every row on Display, Graphics, View, PC Controls and System stepped
+  correctly, including wrap-around.
+- **Not tested:** a popup flush (button -2) while the prompt is up, and the
+  Esc overlay opened over the prompt (it was opened just before one instead).
+
+### KI-30: F12 dialog rewrites a cvar the render thread overrides
+
+- **Status:** fixed in rubensteezy/skate3recomp#42, tested in-game on 2026-10-28 · **Severity:** low · was BT-23
+- **Where:** `src/skate3_native_debug_dialog.cpp` (every section),
+  `SdkCvarOverride` in `src/skate3_native_scene_gpu.cpp`
+- **Cause:** almost every control was written as
+  `REXCVAR_SET(x, CvarCheckbox(..., REXCVAR_GET(x)))`, so each UI frame read
+  the cvar and wrote it straight back, edit or not. `REXCVAR_SET` is a plain
+  store, so a write by another thread that landed between the read and the
+  write-back was undone. For `native_render_suppress_emulated_draws` that
+  other writer is the render thread's `SdkCvarOverride` (KI-11). Undoing its
+  forced value left the menu or photo window running without the override,
+  because `Acquire` never writes again while held. Undoing its restore left the
+  forced value in place after the window closed. The same pattern raced the
+  options menu, the settings overlay, MAX QUALITY and the hotkeys on every
+  other cvar in the dialog. The F5 checkbox read the cvar twice, so an F5
+  press between the reads was toggled straight back.
+- **Fix:** `CvarCheckbox`, `CvarSlider` and `ValueCombo` take the cvar's
+  storage and write it only on the frame ImGui reports an edit. The sun
+  override and F5 checkboxes use the `Checkbox` return value too. The
+  controls that were already conditional (`SliderInt`, `Combo`, `InputInt`
+  and the explicit `SliderFloat`s) are unchanged. While an override holds the
+  suppress cvar, the dialog shows the user's value from the new
+  `SdkCvarOverride::HeldView` (an atomic mirror of the saved value, through
+  `native_scene::SuppressEmulatedDrawsOverride`), greys the box out and adds
+  an "(overridden)" note. `Release` now logs a warning if the forced value
+  was overwritten while held. MAX QUALITY's suspend and restore (KI-12) is
+  unchanged. New debug cvar `skate3_native_debug_open_at_boot` opens F12 at
+  startup for unattended runs.
+- **Tested:** three unattended demo-path boots with F12 open from startup and
+  `--skate3_native_render_scene_menu_unsuppress=true`, so the menu context
+  holds the suppress override. The boot menu ("portrait window - suppress
+  mode -> 3") and the pause menu showed the box ticked, greyed and
+  "(overridden)". After resuming ("leaving menu context - emulated draw
+  suppression restored") it was ticked and editable again. No "overwritten
+  while held" warning in any run. Clicks can't be injected, so control edits
+  and the F5 path ("SDK cvar overrides ... restored") were not exercised.
+- **In-game test (2026-10-28):** user on D3D12: checkbox and slider edits (SSAO, Bloom, Dynamic shadows, bloom threshold, fly speed, MSAA 8x to 4x, shadow tile) stuck across closing and reopening F12; with F12 open during the Edit Skater photo, Suppress emulated draws showed greyed out and (overridden), portraits rendered correctly; F12 MAX QUALITY on and off three times maxed out and restored the user's settings each time; no 'overwritten while held' warning in the log.
+
+### KI-23: OnShutdown missed several UnregisterBind calls
+
+- **Status:** fixed in rubensteezy/skate3recomp#35, tested in-game on 2026-10-28
+- **Problem:** `Skate3BaseApp::OnCreateDialogs` registers ten key binds, but
+  `OnShutdown` only unregistered six. The screenshot bind (F6, captures
+  `this`), the F5 renderer toggle, the Ctrl+Shift+B showcase bind and the End
+  freecam bind stayed live. The SDK's bind registry is a process-lifetime
+  static, so a key event reaching it after the app object was gone would call
+  into a destroyed object.
+- **Reach:** low in practice. The normal window close (and the overlay's Close
+  Game on Windows/Linux) ends in `ReXApp::OnClosing`, which hard-exits before
+  `OnDestroy`, so `OnShutdown` never runs there. It runs when the app quits
+  through `QuitFromUIThread` or a failed `OnInitialize`: a cancelled or failed
+  ISO / title update install, a `ConstructRuntime` failure, and Close Game on
+  macOS.
+- **Fix:** binds are registered through `RegisterAppBind`, which records each
+  name; `OnShutdown` calls `UnregisterAppBinds`, which unregisters them all in
+  reverse order before the dialogs they reach are reset, and logs
+  "Skate 3 shutdown: unregistered N key binds". The SDK has no RAII bind
+  handle. `UnregisterBind` only nulls the callback, so it is safe at any point
+  in `OnShutdown` (the registry outlives the app, and `ReXApp::OnDestroy`
+  calls `OnShutdown` before its own overlay teardown).
+- **Tested:** relwithdebinfo build. A bogus `SKATE3_INSTALL_ISO` into an empty
+  game root makes the installer fail and quit through `OnShutdown`: the log
+  shows "unregistered 10 key binds", exit code 0, no WER report (the baseline
+  build exits the same way without the line). `--skate3_demo_path=true` to
+  gameplay, then WM_CLOSE: "Title terminated; hard-exiting process.", exit
+  code 0, no WER report, same as baseline.
+- **Not tested:** pressing the bind keys in this build (synthetic keys could
+  not reach the unfocused window).
+- **In-game test (2026-10-28):** user on D3D12, fullscreen: F6 saved a screenshot, F5 switched to emulated and back, End engaged and released freecam (422 guest SetViewMatrix rewrites), Esc > Close Game and Alt+F4 both logged 'Window closing' then 'Title terminated' with no crash dump.
+
+### KI-32: Small cleanups
+
+- **Status:** fixed in rubensteezy/skate3recomp#44, tested in-game on 2026-10-28 · **Severity:** low · was BT-25
+- **Problems and fixes:**
+  - Screenshots taken within the same second got the same filename, so the
+    later save overwrote the earlier one. `ScreenshotPath`
+    (`src/skate3_screenshot.cpp`) now writes
+    `shot_YYYYMMDD_HHMMSS_mmm[_tag].png`. The millisecond stamp is strictly
+    increasing per process, so captures in the same millisecond still
+    differ, and name order stays capture order.
+  - `blur_tex` (popup blur, also the photo-grab source) was created once and
+    never rebuilt, and `menu_blur_tex` was keyed on size only. Both now
+    record the format they were built with and are recreated when the guest
+    output format changes (`EnsureBlurOutlineTargets`,
+    `src/skate3_native_scene_gpu.cpp`), like the blur PSOs. The guest output
+    is a fixed R10G10B10A2 on both backends today, so this guards a future
+    change; HDR on/off changes the scene format, not this one.
+  - `kSceneRingFrames` is 2400 on purpose: the RB+A note says the dump is
+    retroactive about 17 s, which is 2400 frames at 144 fps. The four
+    "~900 frames" comments were stale and now say 2400.
+  - `skate3_native_scene_state.h` (`MaybeDumpSceneRing`) now includes
+    `<ctime>` and `<fstream>`. Compiled on its own, the old header failed on
+    `std::ofstream`; the new one compiles.
+- **Tested:** a unit check of the naming code (3000-name burst, 4 threads)
+  found no duplicates and sorted order equal to capture order. Two
+  unattended boots (HDR on, HDR off) ran the post sweep, which saved 7
+  screenshots with the new names (up to three in one second), opened the
+  pause menu with its popup blur showing, and logged no blur errors. The
+  settings-overlay blur (`menu_blur_tex`, Esc/F1) needs a key press and was
+  not exercised.
+- **In-game test (2026-10-28):** user on D3D12, 4K fullscreen: five F6 presses within one second saved five files with distinct millisecond stamps (shot_20261028_211526_110 to _760); the Esc settings overlay and the pause-menu popup blur looked correct each time. The HDR-toggle recreate path was not exercised (the output format is fixed today).
+
+### KI-17: Texture routing maps grew without bound
+
+- **Status:** fixed in rubensteezy/skate3recomp#29, tested in-game on 2026-10-28 · **Severity:** low–medium · was BT-10
+- **Area:** native renderer, texture cache
+- **Problem:** `tex_routes`, `tex_sticky`, `words_sticky` and
+  `tex_pending_first` were only cleared by the debug cache flush, so they grew
+  for the whole session.
+- **Fix:** every entry is stamped with `last_used_frame` when it is used, and
+  `PruneTexRouting` (in `skate3_native_scene_gpu.cpp`, run right after
+  `EvictTexStore`) sweeps the maps every 120 frames with the store LRU's idle
+  guard (45 s of wall-clock time, never less than 8× the detail-downgrade
+  hold). An idle route or sticky site is only dropped once its words key has
+  no valid decode in the store, because then it serves the same thing a fresh
+  entry would. Anything idle for 5 minutes goes regardless. An entry used this
+  frame is never dropped, so the Edit Skater piece-signature hold (KI-2) and
+  the streaming sticky serving (KI-1) keep their state while it matters.
+- **Stats:** the `native-scene: tex routing pruned N (routes= sticky=
+  words_sticky= pending_first= store=)` line logs at most once a minute when
+  something was pruned. The perf log line (`skate3_native_render_scene_perf_log`)
+  shows the sizes in `store[...]` too.
+- **In-game test (2026-10-28):** user on D3D12, 4K, about 5.5 minutes: free roam with streaming showed no texture flicker or swaps, the replay editor kept a normal frame rate, and skin-tone and clothing edits in Edit Skater showed no wrong textures. The log showed three prune passes (67, 1 and 151 entries) with routes holding at about 1,400 to 1,500; tex_sticky still grew slowly (18,284 to 19,270), so whether it plateaus over a long session is not yet shown.
+
 ### KI-46: Long user-data paths silently drop a VFS overlay alias
 
-- **Status:** fix in review in rubensteezy/skate3recomp#46, tested
-  unattended. Found while fixing KI-19 (#31).
+- **Status:** fixed in rubensteezy/skate3recomp#46, tested in-game on 2026-10-28
 - **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
   / `CreateOverlayDirectory`.
 - **Problem:** with a long user-data path, the overlay folder
@@ -1241,6 +1731,7 @@ repro steps; the entry says where the problem is and how it would show.
   - a file planted where the pedestrian `plugin` folder goes: the new
     warning names the alias and path with "error 183", then "1 of 11 alias
     directories could not be created" and "overlay with 10 aliases".
+- **In-game test (2026-10-28):** user boot on D3D12 with the normal (short) AppData path: the overlay installed with 11 aliases through the new \?\ root, shader storage initialized normally, gameplay prewarm decoded 3,138 meshes with 0 dropped, and Alt+F4 exited cleanly. The long-path case was covered by the unattended test.
 
 ### Reviewed and ruled out (code review)
 
