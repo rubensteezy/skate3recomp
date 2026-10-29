@@ -1658,11 +1658,11 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-97: No way to quit from the game's own menus in fullscreen
 
-- **Status:** fix in review (PR link below), tested unattended up to the
+- **Status:** fix in review in rubensteezy/skate3recomp#52, tested unattended up to the
   prompt. Quit and Cancel were not run: the user asked for no more test game
   launches on this machine while other builds are tested.
 - **Area:** Options menu, app exit
-- **Tracking:** feature request from the user, 2026-10-28.
+- **Tracking:** #52. Feature request from the user, 2026-10-28.
 - **Symptom:** in fullscreen there's no window X. A controller player could
   quit only through the Esc overlay's Close Game. The game's own Options menu
   had no quit option.
