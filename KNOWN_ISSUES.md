@@ -1207,6 +1207,22 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** check whether the game's list scrolls. If not, consider
   grouping the PC rows under one entry.
 
+### KI-101: Distant pop-in during free roam
+
+- **Status:** open · **Severity:** low
+- **Area:** native renderer, streaming / LOD
+- **Tracking:** none yet. Seen by the user while testing KI-21 (#33) on
+  2026-10-28.
+- **Symptom:** objects pop in at a distance while skating, noticed with
+  Ambient Occlusion off (D3D12, 4K, MSAA 8x).
+- **Ruled out:** the occlusion cull. The pop-in stayed with
+  `--skate3_native_render_scene_occlusion_cull=false`.
+- **Not yet checked:** whether it also shows with AO on, on the emulated
+  renderer (F5), or with a different draw distance. It may be the game's own
+  streaming/LOD distance rather than a native-renderer bug.
+- **Next step:** compare the same route on F5 and at a higher
+  `skate3_draw_distance_scale` (see KI-18, #30).
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
