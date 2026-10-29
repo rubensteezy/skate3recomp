@@ -187,14 +187,6 @@ repro steps; the entry says where the problem is and how it would show.
   host over-read on a malformed declaration), and several `Map()` results
   aren't checked for null.
 
-### KI-28: Options menu edge cases
-
-- **Status:** open · **Severity:** low · was BT-21
-- **Where:** `src/skate3_options_menu.cpp`
-- **Problem:** `StepRow` takes `% count` with no guard for an empty label
-  list. `g_restart_popup_open` can be left set if the popup closes by a path
-  other than its callback.
-
 ### KI-29: Icon updater leaves `.icon-new` behind
 
 - **Status:** open · **Severity:** low · was BT-22
@@ -1533,6 +1525,50 @@ repro steps; the entry says where the problem is and how it would show.
   frame number with 4 or more regions is never reused while the GPU reads it,
   so the hair and garment corruption that comment describes had some other
   cause.
+
+### KI-28: Options menu edge cases
+
+- **Status:** fixed in rubensteezy/skate3recomp#40, tested in-game on
+  2026-10-28 · **Severity:** low · was BT-21
+- **Where:** `src/skate3_options_menu.cpp`
+- **Problem:** `StepRow` took `% count` with no guard for an empty label
+  list (divide by zero), and the row value getter indexed `label_ids` with
+  whatever the row's getter returned. `g_restart_popup_open` was set when the
+  restart prompt opened and cleared only in its callback.
+- **Cause:** the prompt reuses the Video Calibration popup's callback
+  (`sub_8260EA48`), and the hook answered for the prompt whenever the bool
+  was set. A screen can close a popup by id without calling its callback
+  (`sub_82D0A628`), so the bool could stay set. The next Video Calibration
+  answer would then have been treated as the restart prompt's: its first
+  button would have applied the staged settings and restarted the game.
+- **Fix:** the popup manager returns an id for each popup and passes it to the
+  callback in r3, both for a button press (`sub_825EF698`) and when it flushes
+  all its popups (`sub_82D0A738`, button -2). The hook now stores the
+  prompt's id and answers only a callback carrying that id. Ids come from an
+  ever-increasing counter, so a stale one never matches. Whether the prompt is
+  open is read from the manager's popup queue (`PopupShown`), which also
+  stops a second Back from stacking another prompt. A flush keeps the staged
+  choices and the screen as they are. `StepRow` is a no-op for a row with no
+  labels (no sound, input not consumed). The value getters show nothing
+  for an out-of-range label. The number and string choice setters ignore
+  out-of-range indices.
+- **Tests:** a standalone check of the step and label logic (empty list,
+  wrap, out-of-range getters, popup-id matching) passes. In-game, driven by
+  `skate3_demo_path_gameplay_inputs` (Pause > Options tab > Game Settings >
+  Graphics, step MSAA, Back): the prompt shows ("restart prompt shown"), B
+  doesn't close it (it is A-only), Discard Changes logs button 1 and returns
+  to Game Settings, and the PC rows still step afterwards. Restart Now logs
+  button 0, applies the setting and relaunches. After a Discard, Video
+  Settings > Video Calibration still opens the game's own calibration
+  screens.
+- **In-game test (user, D3D12, 2026-10-28):** three restart prompts answered
+  with Discard, each returning the old value with rows still stepping. The
+  Video Calibration popup that followed was correctly left to the game.
+  Restart Now saved, exited cleanly and relaunched with MSAA 8x changed to 4x.
+  Every row on Display, Graphics, View, PC Controls and System stepped
+  correctly, including wrap-around.
+- **Not tested:** a popup flush (button -2) while the prompt is up, and the
+  Esc overlay opened over the prompt (it was opened just before one instead).
 
 ### Reviewed and ruled out (code review)
 
