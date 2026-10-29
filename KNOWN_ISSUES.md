@@ -1182,6 +1182,18 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** if testing at low budgets matters, lower the floor for dev
   builds or add a debug cvar.
 
+### KI-97: No way to quit from the game's own menus in fullscreen
+
+- **Status:** open (feature request)
+- **Area:** Options menu, app exit
+- **Tracking:** agent working on it (user request, 2026-10-28).
+- **Symptom:** in fullscreen there's no window X. A controller player can quit
+  only through the Esc overlay's Close Game. The game's own Options menu has
+  no quit option.
+- **Next step:** add a "Quit Game" row after the PC settings rows on the root
+  Options screen, with a confirmation popup (the popup-id mechanism from #40).
+  Exit through the same clean path as Close Game.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
