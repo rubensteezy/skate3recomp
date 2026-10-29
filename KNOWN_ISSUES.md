@@ -116,14 +116,6 @@ repro steps; the entry says where the problem is and how it would show.
   while the photo editor is closed).
 - **Fix idea:** a generation counter bumped on every depth rebuild.
 
-### KI-21: Occlusion culling silently inactive with SSAO off
-
-- **Status:** open · **Severity:** low–medium · was BT-14
-- **Area:** native renderer, performance
-- **Problem:** the occlusion grid is only produced inside `ApplySsaoPass`.
-  With SSAO off, the grid expires after 240 frames and the occlusion cull
-  stays off without any message.
-
 ### KI-22: Shadow-dump readback buffers not resized (debug only)
 
 - **Status:** open · **Severity:** low–medium · was BT-15
@@ -1776,6 +1768,51 @@ repro steps; the entry says where the problem is and how it would show.
     warning names the alias and path with "error 183", then "1 of 11 alias
     directories could not be created" and "overlay with 10 aliases".
 - **In-game test (2026-10-28):** user boot on D3D12 with the normal (short) AppData path: the overlay installed with 11 aliases through the new \?\ root, shader storage initialized normally, gameplay prewarm decoded 3,138 meshes with 0 dropped, and Alt+F4 exited cleanly. The long-path case was covered by the unattended test.
+
+### KI-21: Occlusion culling silently inactive with SSAO off
+
+- **Status:** fixed in rubensteezy/skate3recomp#33, tested in-game on 2026-10-28 · **Severity:** low–medium · was BT-14
+- **Area:** native renderer, performance. The emulated renderer (F5) has no
+  occlusion cull, so it is not affected.
+- **Problem:** with Ambient Occlusion off, the occlusion cull never ran and
+  nothing said so. Unattended boots into free roam (1600x900, MSAA 8x),
+  read from the `native-scene: frame` perf line:
+
+  | Build, backend | SSAO | items | draws | culled/frame | guest skips/frame | render thread |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | before, D3D12 | on | 678 | 1095 | 137 | 540 | 0.9 ms |
+  | before, D3D12 | off | 1048 | 1922 | 0 | 0 | 1.4 ms |
+  | before, Vulkan | on | 675 | 1080 | 139 | 539 | 0.9 ms |
+  | before, Vulkan | off | 1056 | 1931 | 0 | 0 | 1.4 ms |
+  | after, D3D12 | on | 674 | 1088 | 137 | 539 | 0.9 ms |
+  | after, D3D12 | off | 681 | 1106 | 139 | 539 | 1.0 ms |
+  | after, Vulkan | on | 670 | 1072 | 139 | 541 | 0.9 ms |
+  | after, Vulkan | off | 666 | 1087 | 138 | 540 | 1.0 ms |
+
+- **Cause:** the cull reads a small depth grid (a tile-MAX reduce of the
+  linearized scene depth, read back 1-2 frames late). Only `ApplySsaoPass`
+  (`src/skate3_native_scene_post.cpp`) built it, from the GTAO chain's
+  linear-depth plane. With SSAO off no grid was ever built, the grid went
+  invalid after 240 frames, and `RenderScene` kept the cull, the build-side
+  skip and the guest dispatch filter off without a log line.
+- **Fix:** the grid build is factored out of `ApplySsaoPass` into
+  `RecordOcclusionGrid`, with shared helpers for the binding layout, the
+  linear-depth plane, the depth view and the linearize draw. When the GTAO
+  chain does not run, the new `ApplyOcclusionGridPass` does only the
+  full-res linearize (its own `ps_linearize` PSO) and the grid reduce. It
+  runs only on frames where `ApplySsaoPass` did not, so there is one grid
+  build per frame either way. SSR and the volumetrics reuse the linear depth
+  it leaves, as they already did after the SSAO pass. No shader changes.
+  `RenderScene` now logs `native-scene: occlusion cull active (<grid
+  source>)` or `... inactive (<reason>)` when the cull's state holds for 30
+  frames, at most one line per 5 s.
+- **Tested:** unattended `--skate3_demo_path=true` boots on D3D12 and
+  Vulkan, SSAO on and off, MSAA 8x and 1x. Screenshots of a D3D12 run with
+  SSAO off while the skater pushes showed nothing missing. Vulkan frames
+  could not be captured by the test script.
+- **Not tested:** free roam by hand, toggling SSAO live, and loading or
+  map-switch transitions.
+- **In-game test (2026-10-28):** user on D3D12 and Vulkan, 4K, MSAA 8x. With AO off the standalone depth pass came up ('grid built without SSAO') and the cull stayed active: on D3D12 occl_culled kept rising (about 1.4M to 4.7M over five minutes) at a steady 113-120 fps, including the replay editor. The cull went inactive only once, after a large camera move, with no flapping. Distant pop-in (D3D12) and a bike rack popping in up close (Vulkan) were also seen with culling forced off, so they are not this change (tracked as KI-101).
 
 ### Reviewed and ruled out (code review)
 
