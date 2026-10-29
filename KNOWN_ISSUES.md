@@ -1192,8 +1192,13 @@ repro steps; the entry says where the problem is and how it would show.
 - **Ruled out:** the occlusion cull. Both the distant pop-in (D3D12) and the
   bike rack (Vulkan) stayed with
   `--skate3_native_render_scene_occlusion_cull=false`.
-- **Not yet checked:** whether it also shows with AO on, on the emulated
-  renderer (F5), or with a different draw distance. It may be the game's own
+- **With #30 (KI-18):** trees and other far scenery stayed drawn at the
+  extended distance, but the bike rack still popped. To the user it looks
+  like LOD or shadow drawing, not draw distance.
+- **Not yet checked:** whether it also shows with AO on, or on the emulated
+  renderer (F5). Also whether it's the object itself or only its shadow that
+  pops: compare with dynamic shadows off in F12, and take an F10 capture just
+  before and after it pops. It may be the game's own
   streaming/LOD distance rather than a native-renderer bug.
 - **Next step:** compare the same route on F5 and at a higher
   `skate3_draw_distance_scale` (see KI-18, #30).
