@@ -685,7 +685,7 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
   // skate3_native_render_mode_indicator shows it live). Input-transparent,
   // so it never affects cursor or focus handling.
   render_mode_indicator_ = std::make_unique<skate3::RenderModeIndicator>(drawer);
-  rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
+  RegisterAppBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
     // Escape backs out of the settings screen level by level (rows ->
     // category rail -> closed); when the screen is closed it opens it.
     if (simple_settings_dialog_ && simple_settings_dialog_->visible()) {
@@ -694,7 +694,7 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
       ToggleSimpleSettings();
     }
   });
-  rex::ui::RegisterBind("bind_skate3_menu_alt", "F1", "Skate 3 settings alternate", [this] {
+  RegisterAppBind("bind_skate3_menu_alt", "F1", "Skate 3 settings alternate", [this] {
     ToggleSimpleSettings();
   });
   // Remembered handle: the F11 paired A/B parity capture (native + emulated
@@ -702,50 +702,50 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
   // skate3_native_render.cpp) needs the window without an app pointer.
   skate3::screenshot::RememberWindow(window() ? window()->GetNativeWindowHandle()
                                               : nullptr);
-  rex::ui::RegisterBind("bind_skate3_screenshot", "F6",
-                        "Save screenshot to screenshots/", [this] {
-                          skate3::screenshot::CaptureWindow(
-                              window() ? window()->GetNativeWindowHandle() : nullptr);
-                        });
-  rex::ui::RegisterBind("bind_skate3_native_render_toggle", "F5",
-                        "Toggle native/emulated renderer", [] {
-                          skate3::native_scene::ToggleSceneEnabled();
-                        });
-  rex::ui::RegisterBind("bind_skate3_save_draw_fingerprints", "F8",
-                        "Save draw fingerprint log", [this] {
-                          SaveDrawFingerprintLog();
-                        });
-  rex::ui::RegisterBind("bind_skate3_log_debug_marker", "F9",
-                        "Write debug marker to log", [this] {
-                          LogDebugMarker();
-                        });
-  rex::ui::RegisterBind("bind_skate3_log_user_marker", "F10",
-                        "Write marker to log", [this] {
-                          LogUserMarker();
-                        });
-  rex::ui::RegisterBind("bind_skate3_native_debug", "F12",
-                        "Native render debug menu", [this] {
-                          ToggleNativeDebug();
-                        });
-  rex::ui::RegisterBind("bind_skate3_showcase", "Ctrl+Shift+B",
-                        "Graphics build-up showcase", [] {
-                          // A capture/recording tool, not a player feature:
-                          // like the capture hotkeys, the bind is inert
-                          // unless the diagnostics cvar opts in (the F12
-                          // Showcase Setup window still starts runs).
-                          if (!REXCVAR_GET(skate3_native_render_capture_hotkeys)) {
-                            return;
-                          }
-                          REXCVAR_SET(
-                              skate3_native_render_scene_showcase,
-                              !REXCVAR_GET(skate3_native_render_scene_showcase));
-                        });
-  rex::ui::RegisterBind("bind_skate3_freecam", "End",
-                        "Drone camera (free fly)", [] {
-                          REXCVAR_SET(
-                              skate3_native_render_scene_freecam,
-                              !REXCVAR_GET(skate3_native_render_scene_freecam));
-                        });
+  RegisterAppBind("bind_skate3_screenshot", "F6",
+                  "Save screenshot to screenshots/", [this] {
+                    skate3::screenshot::CaptureWindow(
+                        window() ? window()->GetNativeWindowHandle() : nullptr);
+                  });
+  RegisterAppBind("bind_skate3_native_render_toggle", "F5",
+                  "Toggle native/emulated renderer", [] {
+                    skate3::native_scene::ToggleSceneEnabled();
+                  });
+  RegisterAppBind("bind_skate3_save_draw_fingerprints", "F8",
+                  "Save draw fingerprint log", [this] {
+                    SaveDrawFingerprintLog();
+                  });
+  RegisterAppBind("bind_skate3_log_debug_marker", "F9",
+                  "Write debug marker to log", [this] {
+                    LogDebugMarker();
+                  });
+  RegisterAppBind("bind_skate3_log_user_marker", "F10",
+                  "Write marker to log", [this] {
+                    LogUserMarker();
+                  });
+  RegisterAppBind("bind_skate3_native_debug", "F12",
+                  "Native render debug menu", [this] {
+                    ToggleNativeDebug();
+                  });
+  RegisterAppBind("bind_skate3_showcase", "Ctrl+Shift+B",
+                  "Graphics build-up showcase", [] {
+                    // A capture/recording tool, not a player feature:
+                    // like the capture hotkeys, the bind is inert
+                    // unless the diagnostics cvar opts in (the F12
+                    // Showcase Setup window still starts runs).
+                    if (!REXCVAR_GET(skate3_native_render_capture_hotkeys)) {
+                      return;
+                    }
+                    REXCVAR_SET(
+                        skate3_native_render_scene_showcase,
+                        !REXCVAR_GET(skate3_native_render_scene_showcase));
+                  });
+  RegisterAppBind("bind_skate3_freecam", "End",
+                  "Drone camera (free fly)", [] {
+                    REXCVAR_SET(
+                        skate3_native_render_scene_freecam,
+                        !REXCVAR_GET(skate3_native_render_scene_freecam));
+                  });
 }
 
 void Skate3BaseApp::OnPostSetup() {
@@ -856,17 +856,33 @@ void Skate3BaseApp::OnShutdown() {
   if (window()) {
     skate3::freecam_input::Unregister(window());
   }
-  rex::ui::UnregisterBind("bind_skate3_menu");
-  rex::ui::UnregisterBind("bind_skate3_menu_alt");
-  rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");
-  rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
-  rex::ui::UnregisterBind("bind_skate3_log_user_marker");
-  rex::ui::UnregisterBind("bind_skate3_native_debug");
+  // Before the dialogs below are reset: the bind callbacks capture `this` and
+  // reach into them. The SDK's bind registry is a process-lifetime static and
+  // ReXApp::OnDestroy calls OnShutdown before tearing down its own overlays,
+  // so unregistering here is always inside the registry's lifetime.
+  UnregisterAppBinds();
   ApplyGameplayCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(false);
   simple_settings_dialog_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
+}
+
+void Skate3BaseApp::RegisterAppBind(std::string_view name, std::string_view default_key,
+                                    std::string_view description,
+                                    std::function<void()> callback) {
+  rex::ui::RegisterBind(name, default_key, description, std::move(callback));
+  registered_binds_.emplace_back(name);
+}
+
+void Skate3BaseApp::UnregisterAppBinds() {
+  // Reverse registration order. UnregisterBind nulls the callback (the entry
+  // and its cvar stay registered), so a key event after this is a no-op.
+  for (auto it = registered_binds_.rbegin(); it != registered_binds_.rend(); ++it) {
+    rex::ui::UnregisterBind(*it);
+  }
+  REXLOG_INFO("Skate 3 shutdown: unregistered {} key binds", registered_binds_.size());
+  registered_binds_.clear();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {
