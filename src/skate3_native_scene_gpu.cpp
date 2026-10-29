@@ -4075,14 +4075,26 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
 // only disable their feature, never abort the native path.
 bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
   nrhi::Device* device = context.device;
+  const nrhi::Format output_format = context.guest_output->format();
+  if (g_r.blur_tex[0] != nullptr && g_r.blur_format != output_format) {
+    // The blur PSOs follow the output format (rtv_format rebuild), so the
+    // intermediates they render into must too.
+    for (int t = 0; t < 2; ++t) {
+      if (g_r.blur_srv[t]) device->DestroyDeferred(g_r.blur_srv[t]);
+      g_r.blur_srv[t] = nullptr;
+      if (g_r.blur_tex[t]) device->DestroyDeferred(g_r.blur_tex[t]);
+      g_r.blur_tex[t] = nullptr;
+    }
+  }
   if (g_r.blur_tex[0] == nullptr && g_r.pso_blur != nullptr) {
     // Popup background blur intermediates at the game's fixed 1152x640
     // internal resolution (the bilinear stretch back to the output is what
-    // produces the authentic frosted-glass lattice).
+    // produces the authentic frosted-glass lattice). Recreated when the
+    // output format changes.
     nrhi::TextureDesc desc;
     desc.width = RendererState::kBlurWidth;
     desc.height = RendererState::kBlurHeight;
-    desc.format = context.guest_output->format();
+    desc.format = output_format;
     desc.initial_state = nrhi::ResourceState::kRenderTarget;
     bool ok = true;
     for (int t = 0; t < 2 && ok; ++t) {
@@ -4104,7 +4116,9 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
         break;
       }
     }
-    if (!ok) {
+    if (ok) {
+      g_r.blur_format = output_format;
+    } else {
       REXLOG_ERROR("native-scene: blur intermediate creation failed; blur disabled");
       for (int t = 0; t < 2; ++t) {
         if (g_r.blur_srv[t]) device->DestroyDeferred(g_r.blur_srv[t]);
@@ -4118,11 +4132,12 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
 
   // Settings-menu gaussian intermediates: half the output resolution
   // (sigma halves with it; the final bilinear stretch back is invisible
-  // under a real blur), recreated whenever the output size changes.
+  // under a real blur), recreated whenever the output size or format
+  // changes.
   const uint32_t menu_w = std::max(1u, context.guest_output_width / 2);
   const uint32_t menu_h = std::max(1u, context.guest_output_height / 2);
   if ((g_r.menu_blur_tex[0] == nullptr || g_r.menu_blur_w != menu_w ||
-       g_r.menu_blur_h != menu_h) &&
+       g_r.menu_blur_h != menu_h || g_r.menu_blur_format != output_format) &&
       g_r.pso_menu_gauss != nullptr) {
     for (int t = 0; t < 2; ++t) {
       if (g_r.menu_blur_srv[t]) device->DestroyDeferred(g_r.menu_blur_srv[t]);
@@ -4133,7 +4148,7 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
     nrhi::TextureDesc desc;
     desc.width = menu_w;
     desc.height = menu_h;
-    desc.format = context.guest_output->format();
+    desc.format = output_format;
     desc.initial_state = nrhi::ResourceState::kRenderTarget;
     desc.usage = nrhi::kTextureUsageRenderTarget;
     bool ok = true;
@@ -4154,6 +4169,7 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
     if (ok) {
       g_r.menu_blur_w = menu_w;
       g_r.menu_blur_h = menu_h;
+      g_r.menu_blur_format = output_format;
     } else {
       REXLOG_ERROR(
           "native-scene: menu blur intermediate creation failed; menu blur "
@@ -5425,8 +5441,8 @@ class SdkCvarOverride {
   // keep_user: when it returns true for the user's value, the override is
   // tracked but nothing is written (the forced readback length only
   // replaces a disabled <= 0 user setting, never a user-chosen length).
-  SdkCvarOverride(T& (*storage)(), T forced, bool (*keep_user)(T) = nullptr)
-      : storage_(storage), forced_(forced), keep_user_(keep_user) {}
+  SdkCvarOverride(const char* name, T& (*storage)(), T forced, bool (*keep_user)(T) = nullptr)
+      : name_(name), storage_(storage), forced_(forced), keep_user_(keep_user) {}
 
   void Hold(uint32_t owner, bool want) {
     if (want) {
@@ -5441,6 +5457,10 @@ class SdkCvarOverride {
     }
     if (owners_ == 0) {
       saved_ = storage_();
+      // Published before the forced write, so the dialog never sees the
+      // forced value while the hold still reads as off.
+      view_user_.store(saved_, std::memory_order_relaxed);
+      view_held_.store(true, std::memory_order_release);
       written_ = saved_ != forced_ && !(keep_user_ && keep_user_(saved_));
       if (written_) {
         storage_() = forced_;
@@ -5453,9 +5473,22 @@ class SdkCvarOverride {
       return;
     }
     owners_ &= ~owner;
-    if (owners_ == 0 && written_) {
-      storage_() = saved_;
-      written_ = false;
+    if (owners_ == 0) {
+      if (written_) {
+        // Someone else wrote the cvar while it was forced (the F12 dialog's
+        // old per-frame write-back did, KI-30). The user's saved value still
+        // wins, but say so: the window ran without its override from then on.
+        if (storage_() != forced_) {
+          REXLOG_WARN(
+              "native-scene: SDK cvar override on {} was overwritten while held "
+              "(forced {}, found {}); restoring the user's {}",
+              name_, forced_, storage_(), saved_);
+        }
+        storage_() = saved_;
+        written_ = false;
+      }
+      // Cleared after the restore, for the same reason as in Acquire.
+      view_held_.store(false, std::memory_order_release);
     }
   }
   // Returns true if any owner was holding it.
@@ -5468,14 +5501,30 @@ class SdkCvarOverride {
   }
   // The cvar currently carries the forced value in place of the user's.
   bool Overriding() const { return written_; }
+  // Read-only view for other threads (the F12 dialog, KI-30): true while
+  // any owner holds the cvar, with *user set to the user's own value that
+  // the last release restores. Everything else here stays render-thread
+  // only.
+  bool HeldView(T* user) const {
+    if (!view_held_.load(std::memory_order_acquire)) {
+      return false;
+    }
+    if (user != nullptr) {
+      *user = view_user_.load(std::memory_order_relaxed);
+    }
+    return true;
+  }
 
  private:
+  const char* name_;
   T& (*storage_)();
   T forced_;
   bool (*keep_user_)(T);
   uint32_t owners_ = 0;
   T saved_{};
   bool written_ = false;
+  std::atomic<bool> view_held_{false};
+  std::atomic<T> view_user_{};
 };
 
 // The photo grab target is 1152x640x4 = 0x2D0000 bytes (the same surface the
@@ -5484,17 +5533,20 @@ class SdkCvarOverride {
 constexpr int32_t kForceReadbackMaxLength = 0x2D0000;
 
 SdkCvarOverride<bool> g_ovr_suppress_draws(
+    "native_render_suppress_emulated_draws",
     []() -> bool& { return REXCVAR_GET(native_render_suppress_emulated_draws); }, false);
 SdkCvarOverride<int32_t> g_ovr_suppress_mode(
+    "native_render_suppress_mode",
     []() -> int32_t& { return REXCVAR_GET(native_render_suppress_mode); }, 3);
 SdkCvarOverride<bool> g_ovr_async_shaders(
-    []() -> bool& { return REXCVAR_GET(async_shader_compilation); }, false);
+    "async_shader_compilation", []() -> bool& { return REXCVAR_GET(async_shader_compilation); },
+    false);
 SdkCvarOverride<int32_t> g_ovr_readback_len(
-    []() -> int32_t& {
-      return REXCVAR_GET(native_render_force_resolve_readback_max_length);
-    },
+    "native_render_force_resolve_readback_max_length",
+    []() -> int32_t& { return REXCVAR_GET(native_render_force_resolve_readback_max_length); },
     kForceReadbackMaxLength, [](int32_t user) { return user > 0; });
 SdkCvarOverride<bool> g_ovr_readback_halfpx(
+    "readback_resolve_half_pixel_offset",
     []() -> bool& { return REXCVAR_GET(readback_resolve_half_pixel_offset); }, true);
 
 // RenderScene's early-out (native scene off / unsupported backend): the gates
@@ -5513,6 +5565,14 @@ void RestoreAllYieldOverrides() {
         "suppress mode, sync shaders, photo readback) restored");
   }
 }
+
+}  // namespace
+
+bool SuppressEmulatedDrawsOverride(bool* user_value) {
+  return g_ovr_suppress_draws.HeldView(user_value);
+}
+
+namespace {
 
 // Render-thread mirror of the presence-context check (set in YieldForMenus):
 // menu screens shorten the 2D texture liveness recheck cadence so in-place
@@ -5599,10 +5659,11 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   // - the texture is persistent guest state that was simply never filled).
   // While a menu context is up, clear the SDK suppress cvar so the emulated
   // pipeline keeps every RTT/composite current; the extra GPU cost is
-  // menu-only. The saved value is restored on the first gameplay frame, so a
-  // user toggle of the underlying cvar in the debug dialog survives (it is
-  // re-read at each menu entry). Held through g_ovr_suppress_draws, shared
-  // with the photo flow.
+  // menu-only. The saved value is restored on the first gameplay frame and
+  // re-read at each menu entry. The F12 dialog shows the saved value and
+  // locks its checkbox while the override is held (KI-30), so a dialog
+  // toggle only lands outside the window. Held through g_ovr_suppress_draws,
+  // shared with the photo flow.
   {
     static bool s_unsup_forced = false;
     const bool want =
@@ -8600,10 +8661,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   uint32_t drawn = 0;
   uint32_t item_index = 0;
   // F7 scene-composition ring (RequestSceneRingDump): one compact signature
-  // per scene item per frame, ~900 frames deep. A 1-2 frame artifact (the
-  // dam-bank blue flash) is uncapturable by F10/F11; the ring lets a
-  // keypress seconds later name exactly which item appeared / vanished /
-  // changed textures on the artifact frame. Entries are recorded at
+  // per scene item per frame, kSceneRingFrames (2400) deep. A 1-2 frame
+  // artifact (the dam-bank blue flash) is uncapturable by F10/F11; the ring
+  // lets a keypress seconds later name exactly which item appeared /
+  // vanished / changed textures on the artifact frame. Entries are recorded at
   // classification below; draw_item stamps the issued-draw count, so an
   // item that early-returned (deferred mesh, skip-new, fade skip) shows
   // drawn=0 that frame.
@@ -12397,6 +12458,9 @@ namespace skate3::native_scene {
 void Install() {}
 bool SceneFailed() { return false; }
 void ResetSceneFailure() {}
+bool SuppressEmulatedDrawsOverride(bool*) {
+  return false;
+}
 }  // namespace skate3::native_scene
 
 #endif  // REX_HAS_D3D12 || REX_HAS_VULKAN
