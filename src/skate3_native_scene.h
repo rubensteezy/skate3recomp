@@ -763,7 +763,7 @@ void FlushMeshCache();
 void RecordCameraSignal(double seconds);
 
 // F7: dump the rolling per-frame scene-composition ring (one compact
-// signature per item per frame for the last ~900 frames) to
+// signature per item per frame for the last 2400 frames) to
 // logs/scene_ring_<ts>.csv on the render thread's next frame. Diffing the
 // artifact frame against its neighbors names exactly which item appeared /
 // vanished / changed textures during a 1-2 frame flash no capture can catch.

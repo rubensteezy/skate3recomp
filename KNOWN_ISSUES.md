@@ -186,15 +186,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Where:** `src/skate3_win_icon.cpp`
 - **Problem:** a failed swap leaves the `.icon-new` file in place.
 
-### KI-32: Small cleanups
-
-- **Status:** open · **Severity:** low · was BT-25
-- **Problems:**
-  - Screenshots taken within the same second get the same filename.
-  - `blur_tex` isn't recreated when the output format changes.
-  - The `kSceneRingFrames` comment says about 900, but the value is 2400.
-  - The header declaring `MaybeDumpSceneRing` is missing includes.
-
 ### KI-37: Dead code for building without Title Update 3
 
 - **Status:** open · **Severity:** low
@@ -1636,6 +1627,38 @@ repro steps; the entry says where the problem is and how it would show.
 - **Not tested:** pressing the bind keys in this build (synthetic keys could
   not reach the unfocused window).
 - **In-game test (2026-10-28):** user on D3D12, fullscreen: F6 saved a screenshot, F5 switched to emulated and back, End engaged and released freecam (422 guest SetViewMatrix rewrites), Esc > Close Game and Alt+F4 both logged 'Window closing' then 'Title terminated' with no crash dump.
+
+### KI-32: Small cleanups
+
+- **Status:** fixed in rubensteezy/skate3recomp#44, tested in-game on 2026-10-28 · **Severity:** low · was BT-25
+- **Problems and fixes:**
+  - Screenshots taken within the same second got the same filename, so the
+    later save overwrote the earlier one. `ScreenshotPath`
+    (`src/skate3_screenshot.cpp`) now writes
+    `shot_YYYYMMDD_HHMMSS_mmm[_tag].png`. The millisecond stamp is strictly
+    increasing per process, so captures in the same millisecond still
+    differ, and name order stays capture order.
+  - `blur_tex` (popup blur, also the photo-grab source) was created once and
+    never rebuilt, and `menu_blur_tex` was keyed on size only. Both now
+    record the format they were built with and are recreated when the guest
+    output format changes (`EnsureBlurOutlineTargets`,
+    `src/skate3_native_scene_gpu.cpp`), like the blur PSOs. The guest output
+    is a fixed R10G10B10A2 on both backends today, so this guards a future
+    change; HDR on/off changes the scene format, not this one.
+  - `kSceneRingFrames` is 2400 on purpose: the RB+A note says the dump is
+    retroactive about 17 s, which is 2400 frames at 144 fps. The four
+    "~900 frames" comments were stale and now say 2400.
+  - `skate3_native_scene_state.h` (`MaybeDumpSceneRing`) now includes
+    `<ctime>` and `<fstream>`. Compiled on its own, the old header failed on
+    `std::ofstream`; the new one compiles.
+- **Tested:** a unit check of the naming code (3000-name burst, 4 threads)
+  found no duplicates and sorted order equal to capture order. Two
+  unattended boots (HDR on, HDR off) ran the post sweep, which saved 7
+  screenshots with the new names (up to three in one second), opened the
+  pause menu with its popup blur showing, and logged no blur errors. The
+  settings-overlay blur (`menu_blur_tex`, Esc/F1) needs a key press and was
+  not exercised.
+- **In-game test (2026-10-28):** user on D3D12, 4K fullscreen: five F6 presses within one second saved five files with distinct millisecond stamps (shot_20261028_211526_110 to _760); the Esc settings overlay and the pause-menu popup blur looked correct each time. The HDR-toggle recreate path was not exercised (the output format is fixed today).
 
 ### Reviewed and ruled out (code review)
 
