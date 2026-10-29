@@ -1214,8 +1214,10 @@ repro steps; the entry says where the problem is and how it would show.
 - **Tracking:** none yet. Seen by the user while testing KI-21 (#33) on
   2026-10-28.
 - **Symptom:** objects pop in at a distance while skating, noticed with
-  Ambient Occlusion off (D3D12, 4K, MSAA 8x).
-- **Ruled out:** the occlusion cull. The pop-in stayed with
+  Ambient Occlusion off (D3D12, 4K, MSAA 8x). On Vulkan, a nearby bike rack
+  also pops in as the skater passes it.
+- **Ruled out:** the occlusion cull. Both the distant pop-in (D3D12) and the
+  bike rack (Vulkan) stayed with
   `--skate3_native_render_scene_occlusion_cull=false`.
 - **Not yet checked:** whether it also shows with AO on, on the emulated
   renderer (F5), or with a different draw distance. It may be the game's own
