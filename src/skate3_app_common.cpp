@@ -107,6 +107,9 @@ REXCVAR_DEFINE_BOOL(skate3_ultrawide_widen_game_frustum, true, "Skate 3",
 REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
                       "Ultrawide display aspect (0 = derive from the host display at boot)")
     .range(0.0, 8.0);
+REXCVAR_DEFINE_BOOL(skate3_native_debug_open_at_boot, false, "Skate 3",
+                    "DEBUG: open the F12 native render debug dialog at startup (for "
+                    "unattended test runs that can't send the F12 key)");
 
 namespace {
 
@@ -749,6 +752,13 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::shader_disasm::RunIfRequested();
   ApplySelectedProfileToRuntime();
   ApplyGameplayCursorMode();
+  if (REXCVAR_GET(skate3_native_debug_open_at_boot)) {
+    app_context().CallInUIThreadDeferred([this]() {
+      if (!native_debug_dialog_ || !native_debug_dialog_->visible()) {
+        ToggleNativeDebug();
+      }
+    });
+  }
   // The drone/free-fly cam sources its keyboard/mouse from the app's window
   // event mirror on every platform (the raw GetAsyncKeyState path in
   // UpdateFreecam is Windows-only). Independent of the MnK controller-emulation
