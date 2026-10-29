@@ -210,14 +210,6 @@ repro steps; the entry says where the problem is and how it would show.
   (see KI-11). Other sliders the render thread touches follow the same pattern.
 - **Fix:** only call `REXCVAR_SET` when the widget reports a change.
 
-### KI-31: C++ tests not built, no CI
-
-- **Status:** open · **Severity:** low · was BT-24
-- **Problem:** `tests/*.cpp` (character fade, Hall of Meat, screen FX) aren't
-  wired into CMake, and they use `assert`, which does nothing in release
-  builds. This repository has no CI, so neither these nor the Python tests
-  (`python -m unittest discover -s tests`) run automatically.
-
 ### KI-32: Small cleanups
 
 - **Status:** open · **Severity:** low · was BT-25
@@ -1389,6 +1381,45 @@ repro steps; the entry says where the problem is and how it would show.
 - **Trade-off:** cloned characters no longer get the caster-bank swap or the
   2-frame gap fill. A `(mesh, ctx)` key could restore both once `ctx` is
   confirmed stable across frames.
+
+### KI-31: C++ tests not built, no CI
+
+- **Status:** fix in review in rubensteezy/skate3recomp#43 · **Severity:**
+  low · was BT-24
+- **Tracking:** #43. CI: all five `tests` jobs pass on the PR (Python 24/24;
+  C++ 3/3 on Windows MSVC 19.51 and clang 22.1, Ubuntu clang 18.1 and
+  GCC 13.3).
+- **Problem:** `tests/*.cpp` (character fade, Hall of Meat, screen FX) weren't
+  wired into CMake, and they used `assert`, which does nothing in release
+  builds. This repository had no CI, so neither these nor the Python tests
+  (`python -m unittest discover -s tests`) ran automatically.
+- **Fix:**
+  - `tests/CMakeLists.txt` builds `character_fade_test`, `hall_of_meat_test`
+    and `screen_fx_test` and registers them with CTest (the `skate3_tests`
+    target builds all three). All three test header-only logic in
+    `src/native/` that includes only the standard library, so none was left
+    out and no stubs were needed.
+  - `-DSKATE3_TESTS_ONLY=ON` configures only the tests, with no SDK checkout,
+    game data, title update or codegen; `-DSKATE3_BUILD_TESTS=ON` adds them to
+    a normal configure. Commands are in CONTRIBUTING.md under Testing.
+  - `assert` is replaced by `CHECK` (`tests/test_check.h`), which runs in
+    every build type, reports each failed expression, and makes the test
+    exit nonzero.
+  - `.github/workflows/tests.yml` runs on pull requests and pushes to `main`:
+    the Python tests on Ubuntu, and the C++ tests with MSVC and clang on
+    Windows and clang and GCC on Ubuntu. It checks out no submodules.
+- **Checked locally:** Python tests (24) pass; all three C++ tests pass with
+  MSVC 19.51 (Release and Debug) and VS clang 22.1.3 (Release, Ninja), using
+  the workflow's own commands. A deliberately failing `CHECK` built with
+  `-DNDEBUG` exits 1.
+- **Candidates to add later:** KI-24's standalone round trip for
+  `src/skate3_user_settings.cpp` and KI-27's DecodeMesh validator test. Their
+  fixes (#36, #39) aren't on `main` yet and neither adds a test file, so
+  nothing is wired up for them here. #39's `src/native/mesh_decode_validate.h`
+  only includes the standard library, so its test can go straight into
+  `tests/CMakeLists.txt` once #39 merges. KI-24's parsing and escaping live in
+  `src/skate3_user_settings.cpp` next to SDK code and need moving into such a
+  header first.
 
 ### KI-33: Hook addresses not gated on Title Update 3
 
