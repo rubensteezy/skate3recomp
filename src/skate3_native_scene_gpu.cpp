@@ -414,6 +414,75 @@ void EvictTexStore(uint64_t frame_number, uint64_t submission) {
   g_store_evicted.fetch_add(n, std::memory_order_relaxed);
 }
 
+// Routing-map pruning (KI-17): tex_routes, tex_sticky, words_sticky and
+// tex_pending_first gain an entry per texture object / draw site ever seen
+// and nothing else removes them. Same idle policy as the store LRU above
+// (wall-clock kTexEvictMinIdleSeconds through the live frame rate, stamped
+// on every use), swept on the store's byte-scan cadence. An idle route or
+// sticky site is dropped only once its words key has no valid decode in
+// the store: with nothing behind it, it serves exactly what a recreated
+// entry would (the hold/sticky paths all require a resident valid entry),
+// so the drop is behavior-neutral. A hard ceiling (kTexRouteMaxIdleSeconds)
+// bounds the rest. Entries used this frame are never candidates, and the
+// age floor sits far past the detail-downgrade hold and the 20-frame
+// first-sight skip window.
+constexpr double kTexRouteMaxIdleSeconds = 300.0;
+std::atomic<uint64_t> g_tex_routing_pruned{0};
+
+void PruneTexRouting(uint64_t frame_number) {
+  static uint64_t s_next_sweep_frame = 0;
+  static uint64_t s_next_log_frame = 0;
+  static uint64_t s_pruned_since_log = 0;
+  if (frame_number < s_next_sweep_frame) {
+    return;
+  }
+  s_next_sweep_frame = frame_number + kStoreByteScanIntervalFrames;
+  const uint64_t hold_floor = 8 * uint64_t(std::max(
+      20, REXCVAR_GET(skate3_native_render_scene_detail_hold)));
+  const uint64_t min_idle = std::max<uint64_t>(
+      hold_floor, uint64_t(g_evict_fps_estimate * kTexEvictMinIdleSeconds));
+  const uint64_t max_idle = std::max<uint64_t>(
+      min_idle, uint64_t(g_evict_fps_estimate * kTexRouteMaxIdleSeconds));
+  const auto stale = [&](uint64_t last_used, uint64_t key) {
+    if (last_used + min_idle >= frame_number) {
+      return false;
+    }
+    if (last_used + max_idle < frame_number) {
+      return true;
+    }
+    const auto it = g_r.tex_store.find(key);
+    return it == g_r.tex_store.end() || !it->second.valid;
+  };
+  size_t pruned = 0;
+  pruned += std::erase_if(g_r.tex_routes, [&](const auto& kv) {
+    return stale(kv.second.last_used_frame, kv.second.key);
+  });
+  pruned += std::erase_if(g_r.tex_sticky, [&](const auto& kv) {
+    return stale(kv.second.last_used_frame, kv.second.words_key);
+  });
+  pruned += std::erase_if(g_r.words_sticky, [&](const auto& kv) {
+    return stale(kv.second.last_used_frame, kv.second.words_key);
+  });
+  pruned += std::erase_if(g_r.tex_pending_first, [&](const auto& kv) {
+    return kv.second.last_used_frame + min_idle < frame_number;
+  });
+  s_pruned_since_log += pruned;
+  g_tex_routing_pruned.fetch_add(pruned, std::memory_order_relaxed);
+  // Once a minute at most, and only when something was pruned: the map
+  // sizes should level off over a long session.
+  if (s_pruned_since_log != 0 && frame_number >= s_next_log_frame) {
+    s_next_log_frame =
+        frame_number + std::max<uint64_t>(60, uint64_t(g_evict_fps_estimate * 60.0));
+    REXLOG_INFO(
+        "native-scene: tex routing pruned {} (routes={} sticky={} "
+        "words_sticky={} pending_first={} store={} min_idle={}f)",
+        s_pruned_since_log, g_r.tex_routes.size(), g_r.tex_sticky.size(),
+        g_r.words_sticky.size(), g_r.tex_pending_first.size(),
+        g_r.tex_store.size(), min_idle);
+    s_pruned_since_log = 0;
+  }
+}
+
 // Mesh cache LRU, same amortized shape: without it every streamed arena's
 // meshes accumulated for the whole session (observed: 61k live buffers
 // after a few minutes of map changes). The wall-clock idle guard keeps the
@@ -6489,7 +6558,8 @@ void ReleaseRetiredAndFlushCaches(const NativeGuestOutputRenderContext& context)
 // passes' alpha-test binding: the main pass owns decode scheduling and
 // live guest reads; an unresolved diffuse just casts opaque for the frames
 // a first-sight decode takes.
-static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr) {
+static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr,
+                                                uint64_t frame_number) {
   if (tex_ptr == 0) {
     return nullptr;
   }
@@ -6497,6 +6567,7 @@ static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr) {
   if (rit == g_r.tex_routes.end()) {
     return nullptr;
   }
+  rit->second.last_used_frame = frame_number;
   auto sit = g_r.tex_store.find(rit->second.key);
   if (sit == g_r.tex_store.end() || !sit->second.valid) {
     return nullptr;
@@ -6858,7 +6929,8 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
         cmd->SetRootConstants(0, 52, constants, 0);
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
         if (phase == 1) {
-          nrhi::TextureView* srv = LookupResolvedTexture(rec.diffuse_tex);
+          nrhi::TextureView* srv =
+              LookupResolvedTexture(rec.diffuse_tex, frame_number);
           cmd->SetTexture(1, srv != nullptr ? srv : g_r.white.srv);
         }
         cmd->SetVertexBuffer(mit->second.vb_view.buffer,
@@ -6892,7 +6964,8 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
 
 bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
                        const FrameScene& scene, uint32_t bone_region,
-                       int32_t debug_mode, uint32_t* out_draws) {
+                       int32_t debug_mode, uint64_t frame_number,
+                       uint32_t* out_draws) {
   nrhi::Cmd* cmd = context.cmd;
   const float* sh = scene.shadow_rows;
   bool shadow_ready = false;
@@ -6997,7 +7070,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
       Caster c{&item, 0, false, false, nullptr};
       if (item.dynobj == 2) {
         c.clip = true;
-        c.clip_srv = LookupResolvedTexture(item.diffuse_tex);
+        c.clip_srv = LookupResolvedTexture(item.diffuse_tex, frame_number);
         any_clip = true;
       }
       if (skinned) {
@@ -7601,7 +7674,7 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
         "rigid[pending={} dropped={} worldprops={}] "
         "rej[dyn={} range={} chain={} geom={} draws={} bbox={}] "
         "rr[decode_fail={} no_bones={} mesh_deferred={} tex_deferred={}] "
-        "store[n={} routes={} evict={}] "
+        "store[n={} routes={} sticky={} wsticky={} pend={} evict={} rpruned={}] "
         "heal[vfail={} demote={}] serve[sticky={} skipnew={} adstale={} adnone={}] "
         "shadow[valid={} ready={} draws={}] char[attempt={} valid={} drawn={} "
         "reused={}] dynobj[valid={} drawn={}] water[valid={} drawn={}] "
@@ -7627,7 +7700,9 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
         g_rej_chain.load(), g_rej_geom.load(), g_rej_draws.load(), g_rej_bbox.load(),
         g_rr_decode_fail.load(), g_rr_no_bones.load(), g_rr_mesh_deferred.load(),
         g_rr_tex_deferred.load(), g_r.tex_store.size(), g_r.tex_routes.size(),
-        g_store_evicted.load(), g_heal_verify_fail.load(),
+        g_r.tex_sticky.size(), g_r.words_sticky.size(),
+        g_r.tex_pending_first.size(), g_store_evicted.load(),
+        g_tex_routing_pruned.load(), g_heal_verify_fail.load(),
         g_demote_hold.load(),
         g_tex_sticky_served.load(), g_skip_new.load(), g_ad_stale_served.load(),
         g_ad_placeholder.load(), scene.shadow_valid,
@@ -8282,6 +8357,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // mesh cache ages out streamed-out arenas the same way.
   UpdateEvictFpsEstimate(frame_number);
   EvictTexStore(frame_number, context.device->CurrentSubmission());
+  PruneTexRouting(frame_number);
   EvictMeshStore(frame_number);
   EvictCubeStore(frame_number, context.device->CurrentSubmission());
 
@@ -8292,7 +8368,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   const int32_t debug_mode = REXCVAR_GET(skate3_native_render_scene_debug);
   cmd->ProfileRegion(nrhi::ProfileStage::kShadow);
   shadow_ready =
-      RenderShadowAtlas(context, scene, bone_region, debug_mode, &shadow_draws);
+      RenderShadowAtlas(context, scene, bone_region, debug_mode, frame_number,
+                        &shadow_draws);
   cmd->ProfileRegion(nrhi::ProfileStage::kStaticSun);
   RenderStaticSunMap(context, scene, bone_region, debug_mode, frame_number);
   g_pw_shadow.Add(perf_ns_since(shadow_t0));
@@ -8695,7 +8772,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         EnqueueWordsMiss(fkey, words);
       }
     } else if (fit->second.valid) {
-      g_r.words_sticky[site] = fkey;
+      g_r.words_sticky[site] = {fkey, frame_number};
       return &fit->second;
     } else if (!retained && frame_number >= fit->second.retry_after_frame) {
       // Failed words decode (payload was mid-stream at first sight): keep
@@ -8705,8 +8782,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       fit->second.retry_after_frame = frame_number + 30;
     }
     const auto pit = g_r.words_sticky.find(site);
-    if (pit != g_r.words_sticky.end() && pit->second != fkey) {
-      const auto old = g_r.tex_store.find(pit->second);
+    if (pit != g_r.words_sticky.end()) {
+      pit->second.last_used_frame = frame_number;
+    }
+    if (pit != g_r.words_sticky.end() && pit->second.words_key != fkey) {
+      const auto old = g_r.tex_store.find(pit->second.words_key);
       if (old != g_r.tex_store.end() && old->second.valid) {
         old->second.last_used_frame = frame_number;
         g_ad_stale_served.fetch_add(1, std::memory_order_relaxed);
@@ -8969,6 +9049,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         tex_pending = true;
         return &g_r.white;
       }
+      rit->second.last_used_frame = frame_number;
       const RendererState::TexRoute& route = rit->second;
       auto sit = g_r.tex_store.find(route.key);
       if (sit == g_r.tex_store.end()) {
@@ -9209,6 +9290,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (t != &g_r.white) {
         RendererState::TexStickySite& site = g_r.tex_sticky[skey];
         drop_foreign_site(site);
+        site.last_used_frame = frame_number;
         // Material-detail downgrade hold: the game's streaming demotes a
         // nearby mesh to its UN (undetailed) material for a fraction of a
         // second and back, the visible flash to completely different/
@@ -9288,6 +9370,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         const auto sit = g_r.tex_sticky.find(skey);
         if (sit != g_r.tex_sticky.end()) {
           drop_foreign_site(sit->second);
+          sit->second.last_used_frame = frame_number;
         }
         if (sit != g_r.tex_sticky.end() && sit->second.words_key != 0) {
           const auto old = g_r.tex_store.find(sit->second.words_key);
@@ -9327,9 +9410,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // white flash: the emulated pop-in semantics (the game shows
         // streamed content only once its data is ready). Bounded so a
         // permanently failing texture still falls back to visible white.
-        const auto [pit, fresh] =
-            g_r.tex_pending_first.try_emplace(item.diffuse_tex, frame_number);
-        if (frame_number - pit->second < 20) {
+        const auto [pit, fresh] = g_r.tex_pending_first.try_emplace(
+            item.diffuse_tex, RendererState::PendingFirst{frame_number});
+        pit->second.last_used_frame = frame_number;
+        if (frame_number - pit->second.first_frame < 20) {
           g_skip_new.fetch_add(1, std::memory_order_relaxed);
           return;
         }
