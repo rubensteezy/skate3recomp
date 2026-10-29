@@ -517,11 +517,12 @@ struct RendererState {
   // Popup background blur (see kBlurShaderSource): two intermediates at the
   // game's fixed 1152x640 internal resolution + a view of the guest output
   // (re-created when the output texture changes). Steady state for
-  // blur_tex is RENDER_TARGET.
+  // blur_tex is RENDER_TARGET; blur_format is the format it was built with.
   static constexpr uint32_t kBlurWidth = 1152;
   static constexpr uint32_t kBlurHeight = 640;
   nrhi::Texture* blur_tex[2] = {nullptr, nullptr};
   nrhi::TextureView* blur_srv[2] = {nullptr, nullptr};
+  nrhi::Format blur_format = nrhi::Format::kUnknown;
   nrhi::TextureView* output_srv_slot = nullptr;
   bool output_srv_allocated = false;
   nrhi::Pipeline* pso_blur = nullptr;
@@ -532,12 +533,13 @@ struct RendererState {
   // of the compose so it frosts everything drawn (3D + HUD/2D + FMV).
   // Deliberately independent of the popup-blur port above (that chain
   // reproduces the console's 1152x640 lattice on purpose). Steady state
-  // RENDER_TARGET; recreated on output size change.
+  // RENDER_TARGET; recreated on output size or format change.
   nrhi::Pipeline* pso_menu_gauss = nullptr;
   nrhi::Texture* menu_blur_tex[2] = {nullptr, nullptr};
   nrhi::TextureView* menu_blur_srv[2] = {nullptr, nullptr};
   uint32_t menu_blur_w = 0;
   uint32_t menu_blur_h = 0;
+  nrhi::Format menu_blur_format = nrhi::Format::kUnknown;
   // Native photo grab (photo_grab_native): the blur downsample pass (whose
   // 1152x640 blur space happens to BE the game's screenshot-target raster)
   // renders the finished frame into blur_tex[0], which is then copied into
@@ -990,8 +992,14 @@ struct RendererState {
   // Last successfully resolved words-key per streamed-art site
   // (mesh << 1 | slot; slot 0 = diffuse override, 1 = decal override).
   // Serves the site's previous art while a new-mip-words decode is in
-  // flight (see resolve_fetch_words). Render thread only.
-  std::unordered_map<uint64_t, uint64_t> words_sticky;
+  // flight (see resolve_fetch_words). Render thread only. The routing maps
+  // here (words_sticky, tex_routes, tex_sticky, tex_pending_first) are
+  // stamped on every use and aged out by PruneTexRouting.
+  struct WordsStickySite {
+    uint64_t words_key = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<uint64_t, WordsStickySite> words_sticky;
   // (The fam 5/6 masks+normal t4/t5 descriptor-pair cache is gone: draws
   // bind both views directly via cmd->SetTexturePair(5, spec, normal);
   // pair descriptors are cached inside the backend, so texture replacement
@@ -1020,6 +1028,7 @@ struct RendererState {
     // and payload polls are suspended while held (the probes would read
     // the reused pool). A re-promote publishes fresh words and re-routes.
     bool demoted = false;
+    uint64_t last_used_frame = 0;
   };
   std::unordered_map<uint32_t, TexRoute> tex_routes;
   // Sticky texture serving (see resolve_texture in draw_item): the last
@@ -1042,12 +1051,17 @@ struct RendererState {
     // serve the previous occupant's art (skin on the hair, a composite mask
     // layer on the arms).
     uint64_t piece = 0;
+    uint64_t last_used_frame = 0;
   };
   std::unordered_map<uint64_t, TexStickySite> tex_sticky;
   // First frame a texture object resolved white-with-heal-in-flight:
   // brand-new items (no sticky fallback) skip drawing for a short window
   // instead of flashing white.
-  std::unordered_map<uint32_t, uint64_t> tex_pending_first;
+  struct PendingFirst {
+    uint64_t first_frame = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<uint32_t, PendingFirst> tex_pending_first;
   bool failed = false;
   bool announced = false;
 };

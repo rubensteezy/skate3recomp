@@ -1237,7 +1237,7 @@ REXCVAR_DEFINE_BOOL(skate3_native_render_scene_perf_items, false, "Skate 3",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_ring, false, "Skate 3",
-                    "Record a rolling per-frame scene-composition ring (~900 "
+                    "Record a rolling per-frame scene-composition ring (2400 "
                     "frames); F7 dumps it to logs/scene_ring_<ts>.csv for "
                     "diffing 1-2 frame artifacts no capture can catch")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
