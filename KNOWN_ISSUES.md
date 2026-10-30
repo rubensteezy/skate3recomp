@@ -1209,6 +1209,48 @@ repro steps; the entry says where the problem is and how it would show.
   `SDL_ShowOpenFileDialog`). Testing needs an X11 Linux machine; there is
   currently none (see the Linux build note in the project memory).
 
+### KI-103: GTK 3 is a hard runtime dependency of the Linux zip
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** Linux packaging
+- **Tracking:** none yet. Found while fixing KI-102 (#55).
+- **Where:** the `UNIX AND NOT APPLE` block of `CMakeLists.txt`
+  (`pkg_check_modules(GTK3 REQUIRED gtk+-3.0)`) and `tools/package_linux.sh`,
+  which bundles only `skate3`, `librexruntime.so` and `librexgpu-xenos.so`.
+- **Problem:** the game links libgtk-3 only for the two file dialogs (ISO and
+  title update). On a system without GTK 3 (a KDE-only or minimal install) the
+  game would fail to start at all, before any dialog.
+- **Next step:** replace the GTK dialogs with SDL3's `SDL_ShowOpenFileDialog`
+  (`SDL_DIALOG` is already on in the SDK). It is asynchronous and uses the
+  desktop portal, so the synchronous picker needs a wait, and it needs a Linux
+  tester to validate.
+
+### KI-104: GDK may install its own X error handler once GTK opens an X11 display
+
+- **Status:** open (unverified) · **Severity:** low
+- **Area:** Linux, X11
+- **Tracking:** none yet. Raised while fixing KI-102 (#55), from memory.
+- **Problem:** GDK installs an Xlib error handler when it opens an X11
+  display. SDL's X11 backend lives in the same process, so an X error after
+  the dialog could exit the process with a GDK message. #55 initialises GTK
+  lazily, only when the first dialog opens, which limits this to the
+  installer phase.
+- **Next step:** the tester should watch for it after the dialog closes (step
+  6 of #55's test steps).
+
+### KI-105: A failed Linux file picker shows nothing in the UI
+
+- **Status:** open · **Severity:** low
+- **Area:** Linux, installer UI
+- **Tracking:** none yet. Found while fixing KI-102 (#55).
+- **Problem:** when no file chooser can be shown, the only feedback is a log
+  line, and the install wizard just stays open. Also, in the `zenity` and
+  `kdialog` fallbacks, an exit code other than 0 is treated as "cancelled", and
+  `kdialog` is not tried after `zenity` runs but fails. That is right for a
+  normal cancel, but a display failure inside `zenity` is not reported.
+- **Next step:** show a message box (or an ImGui notice in the wizard) with
+  the `SKATE3_INSTALL_ISO` hint.
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
