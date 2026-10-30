@@ -1122,19 +1122,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** if testing at low budgets matters, lower the floor for dev
   builds or add a debug cvar.
 
-### KI-97: No way to quit from the game's own menus in fullscreen
-
-- **Status:** open (feature request)
-- **Area:** Options menu, app exit
-- **Tracking:** agent working on it (user request, 2026-10-28).
-- **Symptom:** in fullscreen there's no window X. A controller player can quit
-  only through the Esc overlay's Close Game. The game's own Options menu has
-  no quit option.
-- **Next step:** add a "Quit Game" row after the PC settings rows on the root
-  Options screen, with a confirmation popup (the popup-id mechanism from #40).
-  Exit through the same clean path as Close Game.
-- **Tracking update:** rubensteezy/skate3recomp#52, awaiting in-game test.
-
 ### KI-98: B doesn't dismiss the Options menu's custom popups
 
 - **Status:** open · **Severity:** low
@@ -1840,6 +1827,50 @@ repro steps; the entry says where the problem is and how it would show.
 - **Not tested:** free roam by hand, toggling SSAO live, and loading or
   map-switch transitions.
 - **In-game test (2026-10-28):** user on D3D12 and Vulkan, 4K, MSAA 8x. With AO off the standalone depth pass came up ('grid built without SSAO') and the cull stayed active: on D3D12 occl_culled kept rising (about 1.4M to 4.7M over five minutes) at a steady 113-120 fps, including the replay editor. The cull went inactive only once, after a large camera move, with no flapping. Distant pop-in (D3D12) and a bike rack popping in up close (Vulkan) were also seen with culling forced off, so they are not this change (tracked as KI-101).
+
+### KI-97: No way to quit from the game's own menus in fullscreen
+
+- **Status:** fixed in rubensteezy/skate3recomp#52, tested in-game on 2026-10-29
+- **Area:** Options menu, app exit
+- **Tracking:** #52. Feature request from the user, 2026-10-28.
+- **Symptom:** in fullscreen there's no window X. A controller player could
+  quit only through the Esc overlay's Close Game. The game's own Options menu
+  had no quit option.
+- **Fix:** `src/skate3_options_menu.cpp` adds a Quit Game row after All PC
+  Settings on the root Options screen (Pause > Options > Game Settings, and
+  the front-end Options).
+  - Selecting it shows a popup through the same popup-id mechanism as the
+    restart prompt (`ShowPrompt`, answered in the `sub_8260EA48` hook). The
+    message is "Quit Skate 3? Progress since the last save will be lost."
+    (this popup style shows only the message, not the title). The buttons
+    are the game's own localized `ID_COMMON_CANCEL` and `ID_COMMON_QUIT`, in
+    that order, like the game's own quit prompts (No before Yes), so the
+    default button cancels.
+  - Quit saves the settings and then calls `Skate3BaseApp::CloseGame` in
+    `src/skate3_app_common.cpp`. That is the overlay's Close Game exit,
+    factored out so both use it: `window()->RequestClose()` on Windows and
+    Linux ("Window closing, shutting down..." then "Title terminated"),
+    `QuitFromUIThread` on macOS, plus the 10 s watchdog on macOS and Linux.
+  - Quitting waits (up to 15 s) for a saved game that's open for writing.
+    The XDK `XContentCreate` / `XContentClose` wrappers (`sub_82EDE718` /
+    `sub_82EDE7A8`) are hooked to track saved-game content opened with any
+    disposition other than "open existing".
+  - The seventh root row needed a seventh spare option id. The only ones
+    left (13, 24, 26) are still live selectors in the input handler
+    (`sub_8260C258`) and the value getter (`sub_8260D968`). Id 24 (units) is
+    used, and both hooks now answer for our root rows, so left/right on
+    them do nothing.
+- **Tested unattended (demo-path pad inputs, windowed):** the row shows
+  after All PC Settings, A on it shows the prompt ("quit prompt shown"
+  logged, PrintWindow screenshot), and the game's `ID_COMMON_QUIT` /
+  `ID_COMMON_CANCEL` resolve to "Quit" / "Cancel". At boot the career save
+  `rmcsave` is opened five times, all "open existing" (reads), and each is
+  closed within about 10 ms, so the save tracking doesn't hold a quit back
+  on reads.
+- **Not tested:** Quit, Cancel, a quit during an autosave, and macOS/Linux.
+  B does not dismiss this popup: in the one run, B on the open prompt did
+  nothing and no callback fired. Cancel is the highlighted button and needs A.
+- **In-game test (2026-10-29):** user on D3D12, fullscreen: Options > Game Settings > Quit Game showed the prompt, and choosing Quit saved settings and exited cleanly ('quit prompt answered (button 1)', 'Quit Game confirmed; saving settings and closing the game', 'Window closing', 'Title terminated', no crash dump). Cancel, B on the popup and quitting during an autosave were not exercised in this run.
 
 ### Reviewed and ruled out (code review)
 
