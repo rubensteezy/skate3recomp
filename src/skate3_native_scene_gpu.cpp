@@ -89,6 +89,8 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_mesh_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_pause_native);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_perf_log);
 REXCVAR_DECLARE(int32_t, skate3_native_render_scene_perf_interval);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_upload_ring_gate);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_upload_ring_log);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_perf_items);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_occlusion_cull);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_photo_display_yield);
@@ -2768,6 +2770,136 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
 
 }  // namespace
 
+static_assert(RendererState::kBoneRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kShadowCbRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kUiRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kPfxCbRegions <= UploadRingRegions::kMaxRegions);
+static_assert(RendererState::kScreenFxCbRegions <= UploadRingRegions::kMaxRegions);
+
+void UploadRingRegions::Acquire(nrhi::Device* device, uint64_t frame_number) {
+  ++stats_.acquires;
+  if (!REXCVAR_GET(skate3_native_render_scene_upload_ring_log)) {
+    Pick(device, frame_number);
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  Pick(device, frame_number);
+  stats_.acquire_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - t0)
+                                    .count());
+}
+
+void UploadRingRegions::Pick(nrhi::Device* device, uint64_t frame_number) {
+  const uint64_t completed = device->CompletedSubmission();
+  uint32_t in_flight = 0;
+  for (uint32_t i = 0; i < count_; ++i) {
+    in_flight += submission_[i] > completed ? 1u : 0u;
+  }
+  stats_.in_flight_max = std::max(stats_.in_flight_max, in_flight);
+  // A/B switch: the pre-#28 pick, no completion check.
+  if (!REXCVAR_GET(skate3_native_render_scene_upload_ring_gate)) {
+    current_ = uint32_t(frame_number % count_);
+    return;
+  }
+  // A new high of half the ring or more means the GPU lags far enough to
+  // matter; at most count_ lines per ring per run.
+  if (in_flight > in_flight_high_) {
+    in_flight_high_ = in_flight;
+    if (in_flight * 2 >= count_) {
+      REXLOG_INFO("upload ring {}: {}/{} regions in flight (completed submission {})",
+                  name_, in_flight, count_, completed);
+    }
+  }
+  // Round-robin from the last region: the next one is normally long done.
+  uint32_t oldest = (current_ + 1) % count_;
+  for (uint32_t i = 1; i <= count_; ++i) {
+    const uint32_t r = (current_ + i) % count_;
+    if (submission_[r] <= completed) {
+      stats_.skips += i != 1 ? 1u : 0u;
+      current_ = r;
+      return;
+    }
+    if (submission_[r] < submission_[oldest]) {
+      oldest = r;
+    }
+  }
+  // Every region is still referenced by unfinished GPU work. nrhi can't
+  // wait on a fence, so reuse the oldest one (the pre-KI-16 behavior) and
+  // say so: the frame may show stale HUD, bones or constants.
+  const uint32_t n = exhausted_++;
+  ++stats_.fallbacks;
+  if (n < 8 || (n & 1023u) == 0) {
+    REXLOG_WARN(
+        "upload ring {}: all {} regions in flight (completed submission {}, oldest "
+        "region needs {}); reusing it ({} times so far)",
+        name_, count_, completed, submission_[oldest], n + 1);
+  }
+  current_ = oldest;
+}
+
+// Optional (skate3_native_render_scene_upload_ring_log): one line per perf
+// interval with each ring's counters, the window's frame rate and how far
+// the GPU trails the CPU. Proves from a run log whether the ring helper
+// does more than one pick per frame, falls back, or costs measurable time.
+// GPU lag here is CurrentSubmission - CompletedSubmission at the end of the
+// frame: 1-2 is a CPU-bound or idle GPU, 3+ a GPU that can't keep up.
+static void LogUploadRingStats(nrhi::Device* device, uint64_t frames) {
+  static uint64_t s_lag_max = 0;
+  static uint64_t s_lag_sum = 0;
+  static uint64_t s_lag_n = 0;
+  static uint64_t s_window_frame = 0;
+  static std::chrono::steady_clock::time_point s_window_t0{};
+  if (!REXCVAR_GET(skate3_native_render_scene_upload_ring_log)) {
+    s_window_frame = 0;
+    return;
+  }
+  const uint64_t cur = device->CurrentSubmission();
+  const uint64_t done = device->CompletedSubmission();
+  const uint64_t lag = cur > done ? cur - done : 0;
+  s_lag_max = std::max(s_lag_max, lag);
+  s_lag_sum += lag;
+  ++s_lag_n;
+  const auto now = std::chrono::steady_clock::now();
+  const uint64_t interval = uint64_t(
+      std::max(60, REXCVAR_GET(skate3_native_render_scene_perf_interval)));
+  if (s_window_frame == 0) {
+    // First frame with the log on: drop counts from before it.
+    s_window_frame = frames;
+    s_window_t0 = now;
+    s_lag_max = s_lag_sum = s_lag_n = 0;
+    for (UploadRingRegions* ring : {&g_r.bone_regions, &g_r.ui_regions, &g_r.shadow_cb_regions,
+                                    &g_r.pfx_cb_regions, &g_r.screen_fx_cb_regions}) {
+      ring->TakeStats();
+    }
+    return;
+  }
+  if (frames - s_window_frame < interval) {
+    return;
+  }
+  const uint64_t n = frames - s_window_frame;
+  const double secs = std::chrono::duration<double>(now - s_window_t0).count();
+  std::string rings;
+  uint64_t acquire_ns = 0;
+  for (UploadRingRegions* ring : {&g_r.bone_regions, &g_r.ui_regions, &g_r.shadow_cb_regions,
+                                  &g_r.pfx_cb_regions, &g_r.screen_fx_cb_regions}) {
+    const UploadRingRegions::Stats s = ring->TakeStats();
+    acquire_ns += s.acquire_ns;
+    rings += fmt::format(" | {}: calls={} picks={} skips={} fallbacks={} inflight_max={}",
+                         ring->name(), s.calls, s.acquires, s.skips, s.fallbacks,
+                         s.in_flight_max);
+  }
+  REXLOG_INFO(
+      "upload rings: {} frames in {:.2f}s ({:.0f} fps, {:.2f} ms/frame), gate={}, "
+      "pick time {:.1f}us total ({:.3f}us/frame), gpu lag avg={:.2f} max={}{}",
+      n, secs, secs > 0.0 ? double(n) / secs : 0.0, secs * 1000.0 / double(n),
+      REXCVAR_GET(skate3_native_render_scene_upload_ring_gate) ? "on" : "off(legacy % N)",
+      double(acquire_ns) / 1000.0, double(acquire_ns) / 1000.0 / double(n),
+      s_lag_n ? double(s_lag_sum) / double(s_lag_n) : 0.0, s_lag_max, rings);
+  s_window_frame = frames;
+  s_window_t0 = now;
+  s_lag_max = s_lag_sum = s_lag_n = 0;
+}
+
 // ---- EnsurePipeline helpers ------------------------------------------------
 // Split from the former ~1,000-line EnsurePipeline: one resource
 // group per function, bodies unchanged. Every helper is idempotent (guarded
@@ -3655,10 +3787,10 @@ bool EnsurePhotoFxPipeline(const NativeGuestOutputRenderContext& context) {
       device->Unmap(g_r.pfx_lut_upload);
     }
     if (g_r.pfx_cb == nullptr) {
-      // 8 pass slots x 4 KB x 4 frames in flight.
-      // 10 slots per frame region: depth pack + accum feed + 6 passes +
-      // accum mode 2 + the debug view.
-      g_r.pfx_cb = CreateUploadBuffer(device, 10u * 4096u * 4u);
+      // kPfxCbSlots 4 KB slots per frame region, kPfxCbRegions regions.
+      g_r.pfx_cb = CreateUploadBuffer(
+          device, size_t(RendererState::kPfxCbSlots) * 4096u *
+                      RendererState::kPfxCbRegions);
       g_r.pfx_cb_ptr = g_r.pfx_cb
                            ? static_cast<uint8_t*>(device->Map(g_r.pfx_cb))
                            : nullptr;
@@ -8270,9 +8402,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // Reset this frame's bone ring region (shared by the shadow casters and
   // the main pass: the shadow pass allocates first, the main pass appends).
   const uint64_t frame_number = g_frames_rendered.load(std::memory_order_relaxed);
-  const uint32_t bone_region =
-      uint32_t(frame_number % RendererState::kBoneRegions) *
-      RendererState::kBoneRegionSize;
+  const uint32_t bone_slot = g_r.bone_regions.Region(context.device, frame_number);
+  const uint32_t bone_region = bone_slot * RendererState::kBoneRegionSize;
   // A neutral b2 block prevents ordinary draws from inheriting body opacity.
   std::memset(g_r.bone_ring_cpu + bone_region, 0, 512u);
   g_r.bone_ring_offset = 512u;
@@ -8527,7 +8658,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // shader is also gated by sh_misc.y).
   if (g_r.shadow_cb != nullptr) {
     const uint32_t cb_offset =
-        uint32_t(frame_number % RendererState::kShadowCbRegions) *
+        g_r.shadow_cb_regions.Region(context.device, frame_number) *
         RendererState::kShadowCbSlice;
     float* cb = reinterpret_cast<float*>(g_r.shadow_cb_cpu + cb_offset);
     std::memset(cb, 0, RendererState::kShadowCbSlice);
@@ -10358,9 +10489,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           }
         }
       }
-      const uint32_t region =
-          uint32_t(frame_number % RendererState::kBoneRegions) *
-          RendererState::kRopaRegionSize;
+      const uint32_t region = bone_slot * RendererState::kRopaRegionSize;
       const uint32_t bytes = uint32_t(want_floats * sizeof(float));
       if (ng > 0 && total >= 0.5f && newest != nullptr &&
           buffers.vb_view.stride == 56 &&
@@ -11171,7 +11300,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     return it->second.valid ? &it->second : &g_r.white;
   };
   const uint32_t ui_region =
-      uint32_t(frame_number % RendererState::kUiRegions) * RendererState::kUiRegionSize;
+      g_r.ui_regions.Region(context.device, frame_number) * RendererState::kUiRegionSize;
   uint32_t ui_offset = 0;
   // A skipped spline strip or HUD draw is a visible hole; name it in the log
   // instead of dropping it silently (rolling-capped).
@@ -11414,7 +11543,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     cmd->SetBindingLayout(g_r.layout);
     if (g_r.shadow_cb != nullptr) {
       const uint32_t cb_offset =
-          uint32_t(frame_number % RendererState::kShadowCbRegions) *
+          g_r.shadow_cb_regions.Region(context.device, frame_number) *
         RendererState::kShadowCbSlice;
       cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
       cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
@@ -11578,7 +11707,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
            {-1.0f, 0.5f, 0, 0},
            {-0.5f, -0.888888896f, 1.0f, 1.77777779f}},
       };
-      const uint32_t cb_slot_base = uint32_t(frame_number % 4) * 10;
+      const uint32_t cb_slot_base =
+          g_r.pfx_cb_regions.Region(context.device, frame_number) *
+          RendererState::kPfxCbSlots;
       uint32_t cb_slot_next = 0;
       const int32_t pfx_debug =
           REXCVAR_GET(skate3_native_render_scene_photo_native_debug);
@@ -11818,7 +11949,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cmd->SetBindingLayout(g_r.layout);
       if (g_r.shadow_cb != nullptr) {
         const uint32_t cb_offset =
-            uint32_t(frame_number % RendererState::kShadowCbRegions) *
+            g_r.shadow_cb_regions.Region(context.device, frame_number) *
         RendererState::kShadowCbSlice;
         cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
         cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
@@ -11850,7 +11981,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (vignette != nullptr && vignette != &g_r.white && vignette->valid &&
           vignette->srv != nullptr) {
         const uint64_t cb_offset =
-            uint64_t(frame_number % RendererState::kScreenFxCbRegions) *
+            uint64_t(g_r.screen_fx_cb_regions.Region(context.device, frame_number)) *
             RendererState::kScreenFxCbSlice;
         uint8_t* dst = g_r.screen_fx_cb_ptr + cb_offset;
         std::memset(dst, 0, RendererState::kScreenFxCbSlice);
@@ -11907,7 +12038,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         cmd->SetBindingLayout(g_r.layout);
         if (g_r.shadow_cb != nullptr) {
           const uint32_t frame_cb_offset =
-              uint32_t(frame_number % RendererState::kShadowCbRegions) *
+              g_r.shadow_cb_regions.Region(context.device, frame_number) *
               RendererState::kShadowCbSlice;
           cmd->SetConstantBuffer(6, g_r.shadow_cb, frame_cb_offset);
         }
@@ -12511,6 +12642,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   MaybeDumpSceneRing();
   LogFrameStats(scene, frames, drawn, drawn_2d, drawn_spline, shadow_ready,
                 shadow_draws);
+  LogUploadRingStats(context.device, frames);
   return true;
 }
 

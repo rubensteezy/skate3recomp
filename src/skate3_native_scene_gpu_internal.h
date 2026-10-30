@@ -8,6 +8,7 @@
 
 #include "skate3_native_scene_state.h"
 
+#include <algorithm>
 #include <unordered_set>
 
 #if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
@@ -478,6 +479,80 @@ inline void SwapGuestEndian(uint8_t* data, uint32_t size, xenos::Endian endian) 
   }
 }
 
+// Region picker for the per-frame upload rings the CPU rewrites in place
+// (bones + ROPA verts, UI verts, shadow / photo FX / screen FX constants).
+// Picking `frame_number % N` never checked that the GPU had finished with
+// a region, so a GPU more than N-1 frames behind read a later frame's HUD,
+// bones or constants (KI-16). Each region remembers the last submission
+// that referenced it, and a new frame takes the next region whose
+// submission has completed. Normally that is the same round-robin region
+// as before, so there is no stall. If every region is still in flight the
+// oldest is reused and the pick is logged (rate-limited): nrhi has no
+// fence wait to block on, so this keeps the old behavior as a last resort.
+//
+// Region() returns the same index for every call with the same frame
+// number and marks it with the current submission. A native frame records
+// into one submission (the CP ends it right after the callback), so one
+// call per RenderScene run covers all of the frame's references, and a
+// frame retried after a yield re-marks its region with the new submission.
+// Render thread only.
+//
+// Diagnostics (replay-editor frame-rate report against #28): the cvar
+// skate3_native_render_scene_upload_ring_gate=false switches back to the
+// old `frame_number % N` pick at runtime (F12 > Diagnostics) for an A/B
+// check, and skate3_native_render_scene_upload_ring_log=true logs the
+// per-ring counters below every perf interval (LogUploadRingStats).
+class UploadRingRegions {
+ public:
+  static constexpr uint32_t kMaxRegions = 8;
+
+  // Counters since the last TakeStats().
+  struct Stats {
+    uint64_t calls = 0;      // Region() calls
+    uint64_t acquires = 0;   // new-frame picks
+    uint64_t skips = 0;      // picks that were not the next region in order
+    uint64_t fallbacks = 0;  // every region in flight, oldest reused
+    uint32_t in_flight_max = 0;
+    uint64_t acquire_ns = 0;  // time in Acquire (only while the log is on)
+  };
+
+  constexpr UploadRingRegions(const char* name, uint32_t count)
+      : name_(name), count_(count) {}
+
+  uint32_t Region(nrhi::Device* device, uint64_t frame_number) {
+    ++stats_.calls;
+    if (!acquired_ || frame_number != frame_) {
+      Acquire(device, frame_number);
+      frame_ = frame_number;
+      acquired_ = true;
+    }
+    submission_[current_] = std::max(submission_[current_], device->CurrentSubmission());
+    return current_;
+  }
+
+  const char* name() const { return name_; }
+  Stats TakeStats() {
+    const Stats s = stats_;
+    stats_ = Stats{};
+    return s;
+  }
+
+ private:
+  // skate3_native_scene_gpu.cpp
+  void Acquire(nrhi::Device* device, uint64_t frame_number);
+  void Pick(nrhi::Device* device, uint64_t frame_number);
+
+  const char* name_;
+  uint32_t count_;
+  uint64_t submission_[kMaxRegions] = {};
+  uint64_t frame_ = 0;
+  bool acquired_ = false;
+  uint32_t current_ = 0;
+  uint32_t in_flight_high_ = 0;
+  uint32_t exhausted_ = 0;
+  Stats stats_{};
+};
+
 struct RendererState {
   nrhi::Device* device = nullptr;
   nrhi::BindingLayout* layout = nullptr;  // main scene binding layout (was the root signature)
@@ -594,8 +669,13 @@ struct RendererState {
   nrhi::Texture* pfx_lut = nullptr;      // 32^3 identity grade LUT (RGBA8)
   nrhi::Buffer* pfx_lut_upload = nullptr;
   bool pfx_lut_uploaded = false;
+  // Photo FX constants: kPfxCbSlots 4 KB slots per frame region (depth
+  // pack + accum feed + 6 passes + accum mode 2 + the debug view).
+  static constexpr uint32_t kPfxCbSlots = 10;
+  static constexpr uint32_t kPfxCbRegions = 8;
   nrhi::Buffer* pfx_cb = nullptr;  // upload heap, persistently mapped
   uint8_t* pfx_cb_ptr = nullptr;
+  UploadRingRegions pfx_cb_regions{"photo FX CB", kPfxCbRegions};
   // Fixed SRV views: 0/1 = pfx_full, 2/3 = pfx_half, 4 = quarter, 5 =
   // packed depth, 6 = LUT, 7 = the native MSAA/1x depth resource.
   nrhi::TextureView* pfx_srv[8] = {};
@@ -614,9 +694,10 @@ struct RendererState {
   nrhi::TextureView* screen_fx_input_srv = nullptr;
   uint32_t screen_fx_width = 0, screen_fx_height = 0;
   static constexpr uint32_t kScreenFxCbSlice = 4096;
-  static constexpr uint32_t kScreenFxCbRegions = 4;
+  static constexpr uint32_t kScreenFxCbRegions = 8;
   nrhi::Buffer* screen_fx_cb = nullptr;
   uint8_t* screen_fx_cb_ptr = nullptr;
+  UploadRingRegions screen_fx_cb_regions{"screen FX CB", kScreenFxCbRegions};
   // Screen-space ambient occlusion (ssao.hlsl: GTAO over the resolved
   // scene; see ApplySsaoPass). Own binding layout: root constants b0 + two
   // single-texture tables t0/t1 + point/linear clamp samplers. Full-res
@@ -831,14 +912,16 @@ struct RendererState {
   // in-flight frame.
   static constexpr uint32_t kBoneRegionSize = 1u << 20;
   // 8-deep (was 4): the Vulkan CP was observed letting the GPU lag more
-  // than 3 frames under load - 4-deep regions then recycle while still
-  // referenced (hair shimmer / collapsed garments). If the ring race is
-  // confirmed, the CP-side throttle is the
-  // proper fix and this is defense in depth.
+  // than 3 frames under load - 4-deep regions then recycled while still
+  // referenced (hair shimmer / collapsed garments). bone_regions now only
+  // hands out a region the GPU has finished with (KI-16); the depth is
+  // headroom so that never has to fall back. The ROPA ring shares the
+  // bone ring's region index.
   static constexpr uint32_t kBoneRegions = 8;
   nrhi::Buffer* bone_ring = nullptr;
   uint8_t* bone_ring_cpu = nullptr;
   uint32_t bone_ring_offset = 0;
+  UploadRingRegions bone_regions{"bone", kBoneRegions};
   // ROPA shape-generation ring (per garment mesh): the last decoded vertex
   // arrays keyed by dyn_seq, so the draw can combine the generations under
   // the interp pass's kernel weights (the body's own 8-tap boxcar /
@@ -913,6 +996,7 @@ struct RendererState {
   static constexpr uint32_t kShadowCbSlice = 768;
   nrhi::Buffer* shadow_cb = nullptr;
   uint8_t* shadow_cb_cpu = nullptr;
+  UploadRingRegions shadow_cb_regions{"shadow CB", kShadowCbRegions};
   // Native static sun-shadow map: a single camera-centered ortho depth map
   // of the STATIC world along the material sun (RenderStaticSunMap),
   // sampled at t10 by every lit branch (SampleStaticSun). RG16 to reuse
@@ -997,6 +1081,7 @@ struct RendererState {
   static constexpr uint32_t kUiRegions = 8;
   nrhi::Buffer* ui_ring = nullptr;
   uint8_t* ui_ring_cpu = nullptr;
+  UploadRingRegions ui_regions{"UI", kUiRegions};
   // Last successfully resolved words-key per streamed-art site
   // (mesh << 1 | slot; slot 0 = diffuse override, 1 = decal override).
   // Serves the site's previous art while a new-mip-words decode is in

@@ -77,21 +77,6 @@ repro steps; the entry says where the problem is and how it would show.
   suppressed or failing, its resolve may be lost, or the recomp may break a
   CPU-side step.
 
-### KI-16: Upload rings reused without a GPU completion check
-
-- **Status:** open · **Severity:** low–medium · was BT-09
-- **Area:** native renderer, GPU uploads
-- **Where:** `src/skate3_native_scene_gpu.cpp`, `src/skate3_native_scene_post.cpp`
-- **Problem:** several upload and constant rings pick their slot with
-  `frame_number % N`: the UI ring, the shadow constant buffer, the bone ring,
-  the photo FX CB slots (`% 4`) and the screen FX CB. None checks that the GPU
-  has finished with the slot. The comment above the ring sizes in
-  `skate3_native_scene_gpu_internal.h` notes that a slot was observed being
-  recycled while still in use. It would show as one-frame corruption of HUD,
-  bones or constants when the GPU falls behind.
-- **Fix idea:** gate each slot on `CompletedSubmission()`, or size the rings
-  from the device's frames in flight.
-
 ### KI-18: Draw-distance slots never freed; LOD distances scaled in place
 
 - **Status:** open · **Severity:** low–medium · was BT-11
@@ -1913,6 +1898,57 @@ repro steps; the entry says where the problem is and how it would show.
   B does not dismiss this popup: in the one run, B on the open prompt did
   nothing and no callback fired. Cancel is the highlighted button and needs A.
 - **In-game test (2026-10-29):** user on D3D12, fullscreen: Options > Game Settings > Quit Game showed the prompt, and choosing Quit saved settings and exited cleanly ('quit prompt answered (button 1)', 'Quit Game confirmed; saving settings and closing the game', 'Window closing', 'Title terminated', no crash dump). Cancel, B on the popup and quitting during an autosave were not exercised in this run.
+
+### KI-16: Upload rings reused without a GPU completion check
+
+- **Status:** fixed in rubensteezy/skate3recomp#28, tested in-game on 2026-10-29
+- **Problem:** the native renderer's per-frame upload rings (bone + ROPA
+  vertices, UI vertices, shadow constants, photo FX constants, screen FX
+  constants) picked their region with `frame_number % N` and never checked
+  that the GPU had finished with it. A GPU more than N-1 frames behind would
+  read a later frame's HUD vertices, bones or constants. The bone ring had
+  already been deepened from 4 to 8 after hair and garment corruption on
+  Vulkan under load.
+- **Fix:** `UploadRingRegions` (`skate3_native_scene_gpu_internal.h`, acquire
+  in `skate3_native_scene_gpu.cpp`) is shared by all five rings. Each region
+  records the last submission that used it (`CurrentSubmission()`), and a new
+  frame takes the next region whose submission has completed
+  (`CompletedSubmission()`). Normally that is the same round-robin region as
+  before, so there is no stall. The photo FX and screen FX rings went from 4
+  to 8 regions like the others.
+- **Remaining gap:** nrhi has no fence wait, so if every region is still in
+  flight the oldest is reused (the old behavior) and the log says "upload ring
+  <name>: all N regions in flight" (rate-limited). "upload ring <name>: K/N
+  regions in flight" lines log a new high of half the ring or more.
+- **Reported regression (2026-10-28, D3D12, 4K, MSAA 8x):** with #28's
+  build the replay editor dropped to a low frame rate that seemed to get
+  worse; a main build from 2026-10-13 felt fine. The run log shows the
+  native frame rate falling from 120 fps to 42-50 fps in two windows,
+  21:27:41-21:27:53 and 21:28:18 onward, with 120 fps in between.
+- **Cause:** not #28. Another worktree's full game build
+  (`agent-a164568a7fb15f931`, compiling the `skate3_recomp.*.cpp` units on
+  every core) ran at the same time. Its `.ninja_log` and object timestamps
+  put two builds at 21:27:39-21:27:57 and 21:28:17-21:31:19. Those match the
+  two slow windows to within about 2 s, and the 120 fps stretch is the gap
+  between them. The "SLOW frame maintenance ... dissolve=11930us/1" lines fit
+  CPU starvation too. That step normally takes about 0.1 ms for one view, and
+  #28 creates and destroys no views. #28's region picker is pure CPU work of a
+  few nanoseconds per call. A standalone copy measured 1.6-17 ns per call, with
+  exactly one pick per ring per frame, no growth, and no allocations. Every
+  `Region()` call is inside `RenderScene`, which runs once per native frame on
+  every screen: gameplay, replay editor, photo editor, Create-a-Skater and the
+  pause menu.
+- **Diagnostics added:** `--skate3_native_render_scene_upload_ring_log=true`
+  logs one "upload rings:" line per perf interval. It shows the window's
+  fps, ms per frame and pick time, GPU lag in submissions, and for each ring
+  the calls, picks, skips, fallbacks and peak regions in flight.
+  `skate3_native_render_scene_upload_ring_gate` (default on) switches back to
+  the old `frame_number % N` pick at runtime, for an A/B check. Both are also
+  checkboxes in F12 > Diagnostics > "Upload rings (KI-16)".
+- **To confirm:** run the replay editor for 2 minutes with no build running
+  on the machine. Frame time should match main, and toggling the gate should
+  not change it.
+- **In-game test (2026-10-29):** user on D3D12, 4K, about 6.5 minutes with the upload-ring log on and nothing compiling in the background: replay editor ran smoothly. Log: 118 fps average at the 120 fps cap (one 5 s dip to 94 fps), 0 fallbacks, no 'regions in flight' warnings, GPU at most 2 frames behind, region pick cost about 0.3 us per frame; switching the gate off and on again left the frame rate at 120. The earlier replay-editor slowdown was a build running on the same machine, not this change. Not re-tested on Vulkan.
 
 ### Reviewed and ruled out (code review)
 
