@@ -45,6 +45,9 @@ class Skate3BaseApp : public rex::ReXApp {
   void ApplySettingsCursorMode();
   void ApplyGameplayCursorMode();
   void RestartGame();
+  // The one clean exit (the overlay's Close Game and the Options screen's
+  // Quit Game): closes the window like its X button. Callable from any thread.
+  void CloseGame();
   void SaveDrawFingerprintLog();
   void LogUserMarker();
   void LogDebugMarker();

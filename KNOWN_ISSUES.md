@@ -101,14 +101,6 @@ repro steps; the entry says where the problem is and how it would show.
   while the photo editor is closed).
 - **Fix idea:** a generation counter bumped on every depth rebuild.
 
-### KI-21: Occlusion culling silently inactive with SSAO off
-
-- **Status:** open · **Severity:** low–medium · was BT-14
-- **Area:** native renderer, performance
-- **Problem:** the occlusion grid is only produced inside `ApplySsaoPass`.
-  With SSAO off, the grid expires after 240 frames and the occlusion cull
-  stays off without any message.
-
 ### KI-22: Shadow-dump readback buffers not resized (debug only)
 
 - **Status:** open · **Severity:** low–medium · was BT-15
@@ -319,23 +311,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** find the check in the rexglue SDK's XMA decoder and which
   game sound uses context 31. Compare with upstream rexglue-sdk, then listen
   for a missing or clipped sound at the moment the line is logged.
-
-### KI-46: Long user-data paths silently drop a VFS overlay alias
-
-- **Status:** open · **Severity:** low–medium
-- **Area:** app startup, file system overlay
-- **Tracking:** none yet. Found while fixing KI-19 (#31).
-- **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
-  / `CreateOverlayDirectory`.
-- **Problem:** with a long user-data path, the overlay folder
-  `<cache_root>\vfs_big_directory_aliases\data\state\livingworldentities\pedestrian\plugin`
-  passes CreateDirectoryW's 248-character limit and is never created. The
-  failure is only counted, never logged. A user with a long AppData or
-  portable path would silently lose the pedestrian plugin alias.
-- **Evidence:** a test run from a long scratch path logged "overlay with 10
-  aliases"; the same build from a short path logged 11.
-- **Next step:** log which alias failed. Then use `\\?\` long paths or a
-  shorter overlay root.
 
 ### KI-47: Other startup filesystem calls can throw
 
@@ -1132,19 +1107,6 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** if testing at low budgets matters, lower the floor for dev
   builds or add a debug cvar.
 
-### KI-97: No way to quit from the game's own menus in fullscreen
-
-- **Status:** open (feature request)
-- **Area:** Options menu, app exit
-- **Tracking:** agent working on it (user request, 2026-10-28).
-- **Symptom:** in fullscreen there's no window X. A controller player can quit
-  only through the Esc overlay's Close Game. The game's own Options menu has
-  no quit option.
-- **Next step:** add a "Quit Game" row after the PC settings rows on the root
-  Options screen, with a confirmation popup (the popup-id mechanism from #40).
-  Exit through the same clean path as Close Game.
-- **Tracking update:** rubensteezy/skate3recomp#52, awaiting in-game test.
-
 ### KI-98: B doesn't dismiss the Options menu's custom popups
 
 - **Status:** open · **Severity:** low
@@ -1194,11 +1156,85 @@ repro steps; the entry says where the problem is and how it would show.
 - **Ruled out:** the occlusion cull. Both the distant pop-in (D3D12) and the
   bike rack (Vulkan) stayed with
   `--skate3_native_render_scene_occlusion_cull=false`.
-- **Not yet checked:** whether it also shows with AO on, on the emulated
-  renderer (F5), or with a different draw distance. It may be the game's own
+- **With #30 (KI-18):** trees and other far scenery stayed drawn at the
+  extended distance, but the bike rack still popped. To the user it looks
+  like LOD or shadow drawing, not draw distance.
+- **Not yet checked:** whether it also shows with AO on, or on the emulated
+  renderer (F5). Also whether it's the object itself or only its shadow that
+  pops: compare with dynamic shadows off in F12, and take an F10 capture just
+  before and after it pops. It may be the game's own
   streaming/LOD distance rather than a native-renderer bug.
 - **Next step:** compare the same route on F5 and at a higher
   `skate3_draw_distance_scale` (see KI-18, #30).
+
+### KI-102: Linux crashes at the ISO picker on X11 (GTK has no display)
+
+- **Status:** investigating
+- **Area:** Linux, installer file picker
+- **Tracking:** GitHub issue rubensteezy/skate3recomp#53 (reported by
+  cproo12); fix agent working on it.
+- **Symptom:** on Linux Mint 22.3 with an X11 session (Intel UHD 630), the
+  v2.1.0 release crashes when it opens the "Select ISO" dialog: GTK prints
+  `Gtk-ERROR: Can't create a GtkStyleContext without a display connection`
+  and the process dies with a trace trap. The log shows
+  `SDL video driver: x11` just before. The same code is reported to work under
+  Wayland.
+- **Where:** `PickIsoFile` in `src/skate3_iso_installer.cpp` and
+  `PickTitleUpdateFile` in `src/skate3_title_update_installer.cpp` call
+  `gtk_file_chooser_dialog_new` directly on non-Windows, non-macOS builds.
+- **Cause so far (unconfirmed):** nothing in `src/` calls `gtk_init` or
+  `gtk_init_check`, so GTK never opens its own display connection. Under
+  Wayland something else may initialise GTK as a side effect (for example the
+  libdecor GTK plugin that SDL loads for window decorations), which would hide
+  the bug. Under X11 nothing does. The "X11 vs Wayland" framing in the GitHub
+  thread may therefore be a symptom, not the cause.
+- **Next step:** confirm by reading the code and the SDL/libdecor sources, then
+  call `gtk_init_check` before the first dialog and fall back to something
+  that cannot crash (a clear error, a `zenity`/`kdialog` call, or SDL3's
+  `SDL_ShowOpenFileDialog`). Testing needs an X11 Linux machine; there is
+  currently none (see the Linux build note in the project memory).
+
+### KI-103: GTK 3 is a hard runtime dependency of the Linux zip
+
+- **Status:** open · **Severity:** low–medium
+- **Area:** Linux packaging
+- **Tracking:** none yet. Found while fixing KI-102 (#55).
+- **Where:** the `UNIX AND NOT APPLE` block of `CMakeLists.txt`
+  (`pkg_check_modules(GTK3 REQUIRED gtk+-3.0)`) and `tools/package_linux.sh`,
+  which bundles only `skate3`, `librexruntime.so` and `librexgpu-xenos.so`.
+- **Problem:** the game links libgtk-3 only for the two file dialogs (ISO and
+  title update). On a system without GTK 3 (a KDE-only or minimal install) the
+  game would fail to start at all, before any dialog.
+- **Next step:** replace the GTK dialogs with SDL3's `SDL_ShowOpenFileDialog`
+  (`SDL_DIALOG` is already on in the SDK). It is asynchronous and uses the
+  desktop portal, so the synchronous picker needs a wait, and it needs a Linux
+  tester to validate.
+
+### KI-104: GDK may install its own X error handler once GTK opens an X11 display
+
+- **Status:** open (unverified) · **Severity:** low
+- **Area:** Linux, X11
+- **Tracking:** none yet. Raised while fixing KI-102 (#55), from memory.
+- **Problem:** GDK installs an Xlib error handler when it opens an X11
+  display. SDL's X11 backend lives in the same process, so an X error after
+  the dialog could exit the process with a GDK message. #55 initialises GTK
+  lazily, only when the first dialog opens, which limits this to the
+  installer phase.
+- **Next step:** the tester should watch for it after the dialog closes (step
+  6 of #55's test steps).
+
+### KI-105: A failed Linux file picker shows nothing in the UI
+
+- **Status:** open · **Severity:** low
+- **Area:** Linux, installer UI
+- **Tracking:** none yet. Found while fixing KI-102 (#55).
+- **Problem:** when no file chooser can be shown, the only feedback is a log
+  line, and the install wizard just stays open. Also, in the `zenity` and
+  `kdialog` fallbacks, an exit code other than 0 is treated as "cancelled", and
+  `kdialog` is not tried after `zenity` runs but fails. That is right for a
+  normal cancel, but a display failure inside `zenity` is not reported.
+- **Next step:** show a message box (or an ImGui notice in the wizard) with
+  the `SKATE3_INSTALL_ISO` hint.
 
 ## Resolved
 
@@ -1785,6 +1821,134 @@ repro steps; the entry says where the problem is and how it would show.
   The recipe overlay logged 11 aliases, the same as earlier builds. Not yet
   tested: a normal boot with real DLC installed.
 - **In-game test (2026-10-28):** user boot on D3D12 with an empty dlc folder: 'No Skate 3 DLC packages found', the BIG-directory VFS overlay installed with 11 aliases, gameplay prewarm decoded 3,144 meshes with 0 dropped, and Alt+F4 exited cleanly. Not tested with real DLC packages present (the user has none installed); the unreadable-subfolder path was covered by the unattended test.
+
+### KI-46: Long user-data paths silently drop a VFS overlay alias
+
+- **Status:** fixed in rubensteezy/skate3recomp#46, tested in-game on 2026-10-28
+- **Where:** `src/skate3_app_common.cpp`, `Skate3BaseApp::InstallRecipeOverlay`
+  / `CreateOverlayDirectory`.
+- **Problem:** with a long user-data path, the overlay folder
+  `<cache_root>\vfs_big_directory_aliases\data\state\livingworldentities\pedestrian\plugin`
+  passed CreateDirectoryW's 248-character limit and was never created. The
+  failure was only counted, never logged, so a user with a long AppData or
+  portable path silently lost the pedestrian plugin alias. A test run from a
+  long scratch path logged "overlay with 10 aliases"; the same build from a
+  short path logged 11.
+- **Cause:** the overlay used plain Win32 paths. CreateDirectoryW stops at 248
+  characters, and the SDK host device's `FindFirstFileW` /
+  `GetFileAttributesExW` calls (`ListFiles`, `GetInfo` in
+  `filesystem_win.cpp`) at MAX_PATH. The exe manifest has no `longPathAware`,
+  and that would also need the OS LongPathsEnabled policy.
+- **Fix:** `ToExtendedLengthPath` turns the overlay root into an absolute,
+  normalized `\\?\` path (`\\?\UNC\` for shares) before the folders are
+  created and before it becomes the `skate3bigdirs:` host device root. The
+  SDK device builds every entry path from that root and passes it straight to
+  the wide Win32 calls, so the whole overlay tree is long-path safe with no
+  SDK change and no OS policy. Each alias that can't be created now logs a
+  warning with the guest path, host path, its length and the `error_code`
+  message and Win32 code, plus a summary line ("N of M alias directories
+  could not be created"). Linux and macOS are unchanged.
+- **Tested unattended** (relwithdebinfo, `--skate3_demo_path=true`, cwd = the
+  install folder), each run reached "gameplay reached":
+  - short user-data root (pedestrian alias path 153 characters): "overlay
+    with 11 aliases".
+  - long user-data root (218 characters, pedestrian alias path 299): "overlay
+    with 11 aliases", and the folder exists on disk. The pedestrian and
+    PluginDescriptor `NtCreateFile` probes log the same results as on the
+    short root.
+  - a file planted where the pedestrian `plugin` folder goes: the new
+    warning names the alias and path with "error 183", then "1 of 11 alias
+    directories could not be created" and "overlay with 10 aliases".
+- **In-game test (2026-10-28):** user boot on D3D12 with the normal (short) AppData path: the overlay installed with 11 aliases through the new \?\ root, shader storage initialized normally, gameplay prewarm decoded 3,138 meshes with 0 dropped, and Alt+F4 exited cleanly. The long-path case was covered by the unattended test.
+
+### KI-21: Occlusion culling silently inactive with SSAO off
+
+- **Status:** fixed in rubensteezy/skate3recomp#33, tested in-game on 2026-10-28 · **Severity:** low–medium · was BT-14
+- **Area:** native renderer, performance. The emulated renderer (F5) has no
+  occlusion cull, so it is not affected.
+- **Problem:** with Ambient Occlusion off, the occlusion cull never ran and
+  nothing said so. Unattended boots into free roam (1600x900, MSAA 8x),
+  read from the `native-scene: frame` perf line:
+
+  | Build, backend | SSAO | items | draws | culled/frame | guest skips/frame | render thread |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | before, D3D12 | on | 678 | 1095 | 137 | 540 | 0.9 ms |
+  | before, D3D12 | off | 1048 | 1922 | 0 | 0 | 1.4 ms |
+  | before, Vulkan | on | 675 | 1080 | 139 | 539 | 0.9 ms |
+  | before, Vulkan | off | 1056 | 1931 | 0 | 0 | 1.4 ms |
+  | after, D3D12 | on | 674 | 1088 | 137 | 539 | 0.9 ms |
+  | after, D3D12 | off | 681 | 1106 | 139 | 539 | 1.0 ms |
+  | after, Vulkan | on | 670 | 1072 | 139 | 541 | 0.9 ms |
+  | after, Vulkan | off | 666 | 1087 | 138 | 540 | 1.0 ms |
+
+- **Cause:** the cull reads a small depth grid (a tile-MAX reduce of the
+  linearized scene depth, read back 1-2 frames late). Only `ApplySsaoPass`
+  (`src/skate3_native_scene_post.cpp`) built it, from the GTAO chain's
+  linear-depth plane. With SSAO off no grid was ever built, the grid went
+  invalid after 240 frames, and `RenderScene` kept the cull, the build-side
+  skip and the guest dispatch filter off without a log line.
+- **Fix:** the grid build is factored out of `ApplySsaoPass` into
+  `RecordOcclusionGrid`, with shared helpers for the binding layout, the
+  linear-depth plane, the depth view and the linearize draw. When the GTAO
+  chain does not run, the new `ApplyOcclusionGridPass` does only the
+  full-res linearize (its own `ps_linearize` PSO) and the grid reduce. It
+  runs only on frames where `ApplySsaoPass` did not, so there is one grid
+  build per frame either way. SSR and the volumetrics reuse the linear depth
+  it leaves, as they already did after the SSAO pass. No shader changes.
+  `RenderScene` now logs `native-scene: occlusion cull active (<grid
+  source>)` or `... inactive (<reason>)` when the cull's state holds for 30
+  frames, at most one line per 5 s.
+- **Tested:** unattended `--skate3_demo_path=true` boots on D3D12 and
+  Vulkan, SSAO on and off, MSAA 8x and 1x. Screenshots of a D3D12 run with
+  SSAO off while the skater pushes showed nothing missing. Vulkan frames
+  could not be captured by the test script.
+- **Not tested:** free roam by hand, toggling SSAO live, and loading or
+  map-switch transitions.
+- **In-game test (2026-10-28):** user on D3D12 and Vulkan, 4K, MSAA 8x. With AO off the standalone depth pass came up ('grid built without SSAO') and the cull stayed active: on D3D12 occl_culled kept rising (about 1.4M to 4.7M over five minutes) at a steady 113-120 fps, including the replay editor. The cull went inactive only once, after a large camera move, with no flapping. Distant pop-in (D3D12) and a bike rack popping in up close (Vulkan) were also seen with culling forced off, so they are not this change (tracked as KI-101).
+
+### KI-97: No way to quit from the game's own menus in fullscreen
+
+- **Status:** fixed in rubensteezy/skate3recomp#52, tested in-game on 2026-10-29
+- **Area:** Options menu, app exit
+- **Tracking:** #52. Feature request from the user, 2026-10-28.
+- **Symptom:** in fullscreen there's no window X. A controller player could
+  quit only through the Esc overlay's Close Game. The game's own Options menu
+  had no quit option.
+- **Fix:** `src/skate3_options_menu.cpp` adds a Quit Game row after All PC
+  Settings on the root Options screen (Pause > Options > Game Settings, and
+  the front-end Options).
+  - Selecting it shows a popup through the same popup-id mechanism as the
+    restart prompt (`ShowPrompt`, answered in the `sub_8260EA48` hook). The
+    message is "Quit Skate 3? Progress since the last save will be lost."
+    (this popup style shows only the message, not the title). The buttons
+    are the game's own localized `ID_COMMON_CANCEL` and `ID_COMMON_QUIT`, in
+    that order, like the game's own quit prompts (No before Yes), so the
+    default button cancels.
+  - Quit saves the settings and then calls `Skate3BaseApp::CloseGame` in
+    `src/skate3_app_common.cpp`. That is the overlay's Close Game exit,
+    factored out so both use it: `window()->RequestClose()` on Windows and
+    Linux ("Window closing, shutting down..." then "Title terminated"),
+    `QuitFromUIThread` on macOS, plus the 10 s watchdog on macOS and Linux.
+  - Quitting waits (up to 15 s) for a saved game that's open for writing.
+    The XDK `XContentCreate` / `XContentClose` wrappers (`sub_82EDE718` /
+    `sub_82EDE7A8`) are hooked to track saved-game content opened with any
+    disposition other than "open existing".
+  - The seventh root row needed a seventh spare option id. The only ones
+    left (13, 24, 26) are still live selectors in the input handler
+    (`sub_8260C258`) and the value getter (`sub_8260D968`). Id 24 (units) is
+    used, and both hooks now answer for our root rows, so left/right on
+    them do nothing.
+- **Tested unattended (demo-path pad inputs, windowed):** the row shows
+  after All PC Settings, A on it shows the prompt ("quit prompt shown"
+  logged, PrintWindow screenshot), and the game's `ID_COMMON_QUIT` /
+  `ID_COMMON_CANCEL` resolve to "Quit" / "Cancel". At boot the career save
+  `rmcsave` is opened five times, all "open existing" (reads), and each is
+  closed within about 10 ms, so the save tracking doesn't hold a quit back
+  on reads.
+- **Not tested:** Quit, Cancel, a quit during an autosave, and macOS/Linux.
+  B does not dismiss this popup: in the one run, B on the open prompt did
+  nothing and no callback fired. Cancel is the highlighted button and needs A.
+- **In-game test (2026-10-29):** user on D3D12, fullscreen: Options > Game Settings > Quit Game showed the prompt, and choosing Quit saved settings and exited cleanly ('quit prompt answered (button 1)', 'Quit Game confirmed; saving settings and closing the game', 'Window closing', 'Title terminated', no crash dump). Cancel, B on the popup and quitting during an autosave were not exercised in this run.
 
 ### Reviewed and ruled out (code review)
 

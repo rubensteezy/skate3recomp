@@ -839,6 +839,9 @@ void Skate3BaseApp::OnPostSetup() {
     });
   });
   skate3::options_menu::SetRestartCallback([this]() { RestartGame(); });
+  // Quit Game: the overlay's Close Game exit (CloseGame defers to the UI
+  // thread, so it runs after the settings save queued just before it).
+  skate3::options_menu::SetQuitCallback([this]() { CloseGame(); });
   skate3::options_menu::Install();
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
@@ -945,26 +948,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     ApplyGameplayCursorMode();
     skate3::ResumeMaxQuality();
   };
-  auto close_game = [this]() {
-#if REX_PLATFORM_MAC || REX_PLATFORM_LINUX
-    std::thread([]() {
-      std::this_thread::sleep_for(std::chrono::seconds(10));
-      REXLOG_WARN("Close Game watchdog exiting process after shutdown timeout");
-      std::_Exit(EXIT_SUCCESS);
-    }).detach();
-#endif
-    app_context().CallInUIThreadDeferred([this]() {
-#if REX_PLATFORM_MAC
-      app_context().QuitFromUIThread();
-#else
-      if (window()) {
-        window()->RequestClose();
-      } else {
-        app_context().QuitFromUIThread();
-      }
-#endif
-    });
-  };
+  auto close_game = [this]() { CloseGame(); };
   auto restart_game = [this]() { RestartGame(); };
   // Raw pad poll for menu navigation: bypasses the is_active gate that
   // zeroes guest-facing input while the settings screen is open.
@@ -1020,6 +1004,27 @@ void Skate3BaseApp::ApplyGameplayCursorMode() {
   if (window()) {
     window()->SetCursorVisibility(rex::ui::Window::CursorVisibility::kAutoHidden);
   }
+}
+
+void Skate3BaseApp::CloseGame() {
+#if REX_PLATFORM_MAC || REX_PLATFORM_LINUX
+  std::thread([]() {
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    REXLOG_WARN("Close Game watchdog exiting process after shutdown timeout");
+    std::_Exit(EXIT_SUCCESS);
+  }).detach();
+#endif
+  app_context().CallInUIThreadDeferred([this]() {
+#if REX_PLATFORM_MAC
+    app_context().QuitFromUIThread();
+#else
+    if (window()) {
+      window()->RequestClose();
+    } else {
+      app_context().QuitFromUIThread();
+    }
+#endif
+  });
 }
 
 void Skate3BaseApp::RestartGame() {
@@ -1208,6 +1213,42 @@ std::set<std::string> Skate3BaseApp::DiscoverRecipeAliases(
   return aliases;
 }
 
+namespace {
+
+// The overlay folders sit deep under the user-data root, for example
+// <cache_root>\vfs_big_directory_aliases\data\state\livingworldentities\pedestrian\plugin.
+// Without the \\?\ prefix, CreateDirectoryW stops at 248 characters and the
+// SDK's FindFirstFileW / GetFileAttributesExW calls at MAX_PATH, so a long
+// AppData or portable path silently lost an alias (KI-46). The prefix lifts
+// both limits without the OS LongPathsEnabled policy. The SDK host device
+// hands its paths straight to the wide Win32 calls and builds every entry
+// path from the device root, so the whole overlay tree inherits the prefix.
+// The prefix turns off Win32 path parsing, so the path must be absolute and
+// normalized (backslashes only, no "." or ".." parts).
+std::filesystem::path ToExtendedLengthPath(const std::filesystem::path& path) {
+#if defined(_WIN32)
+  std::error_code ec;
+  const auto absolute = std::filesystem::absolute(path, ec);
+  if (ec) {
+    return path;
+  }
+  const std::wstring text = absolute.lexically_normal().native();
+  if (text.rfind(LR"(\\?\)", 0) == 0 || text.rfind(LR"(\\.\)", 0) == 0 ||
+      text.rfind(LR"(\??\)", 0) == 0) {
+    return text;
+  }
+  if (text.rfind(LR"(\\)", 0) == 0) {
+    // UNC share: \\server\share\... becomes \\?\UNC\server\share\...
+    return std::wstring(LR"(\\?\UNC\)") + text.substr(2);
+  }
+  return std::wstring(LR"(\\?\)") + text;
+#else
+  return path;
+#endif
+}
+
+}  // namespace
+
 bool Skate3BaseApp::CreateOverlayDirectory(
     const std::filesystem::path& overlay_root, std::string_view guest_path) {
   std::filesystem::path path = overlay_root;
@@ -1226,7 +1267,14 @@ bool Skate3BaseApp::CreateOverlayDirectory(
 
   std::error_code ec;
   std::filesystem::create_directories(path, ec);
-  return !ec;
+  if (ec) {
+    REXLOG_WARN("Skate 3 BIG-directory VFS overlay: failed to create alias {} at {} ({} chars): "
+                "{} (error {})",
+                guest_path, rex::path_to_utf8(path), path.native().size(), ec.message(),
+                ec.value());
+    return false;
+  }
+  return true;
 }
 
 void Skate3BaseApp::InstallRecipeOverlay() {
@@ -1254,12 +1302,12 @@ void Skate3BaseApp::InstallRecipeOverlay() {
     return;
   }
 
-  const auto overlay_root = cache_root() / "vfs_big_directory_aliases";
+  const auto overlay_root = ToExtendedLengthPath(cache_root() / "vfs_big_directory_aliases");
   std::error_code ec;
   std::filesystem::create_directories(overlay_root, ec);
   if (ec) {
-    REXLOG_WARN("Skipping Skate 3 BIG-directory VFS overlay; failed to create {}: {}",
-                overlay_root.string(), ec.message());
+    REXLOG_WARN("Skipping Skate 3 BIG-directory VFS overlay; failed to create {}: {} (error {})",
+                rex::path_to_utf8(overlay_root), ec.message(), ec.value());
     return;
   }
 
@@ -1283,18 +1331,24 @@ void Skate3BaseApp::InstallRecipeOverlay() {
       ++created;
     }
   }
+  const size_t failed = aliases.size() + std::size(kBigDirectoryAliases) - created;
 
   if (!created) {
     REXLOG_WARN("Skipping Skate 3 BIG-directory VFS overlay; failed to create alias directories in {}",
-                overlay_root.string());
+                rex::path_to_utf8(overlay_root));
     return;
+  }
+  if (failed) {
+    REXLOG_WARN("Skate 3 BIG-directory VFS overlay: {} of {} alias directories could not be "
+                "created in {}; see the warnings above",
+                failed, created + failed, rex::path_to_utf8(overlay_root));
   }
 
   auto device = std::make_unique<rex::filesystem::HostPathDevice>(
       "skate3bigdirs:", overlay_root, true);
   if (!device->Initialize()) {
     REXLOG_WARN("Skipping Skate 3 BIG-directory VFS overlay; failed to initialize host device for {}",
-                overlay_root.string());
+                rex::path_to_utf8(overlay_root));
     return;
   }
 
