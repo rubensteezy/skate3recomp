@@ -1195,6 +1195,33 @@ repro steps; the entry says where the problem is and how it would show.
 - **Next step:** compare the same route on F5 and at a higher
   `skate3_draw_distance_scale` (see KI-18, #30).
 
+### KI-102: Linux crashes at the ISO picker on X11 (GTK has no display)
+
+- **Status:** investigating
+- **Area:** Linux, installer file picker
+- **Tracking:** GitHub issue rubensteezy/skate3recomp#53 (reported by
+  cproo12); fix agent working on it.
+- **Symptom:** on Linux Mint 22.3 with an X11 session (Intel UHD 630), the
+  v2.1.0 release crashes when it opens the "Select ISO" dialog: GTK prints
+  `Gtk-ERROR: Can't create a GtkStyleContext without a display connection`
+  and the process dies with a trace trap. The log shows
+  `SDL video driver: x11` just before. The same code is reported to work under
+  Wayland.
+- **Where:** `PickIsoFile` in `src/skate3_iso_installer.cpp` and
+  `PickTitleUpdateFile` in `src/skate3_title_update_installer.cpp` call
+  `gtk_file_chooser_dialog_new` directly on non-Windows, non-macOS builds.
+- **Cause so far (unconfirmed):** nothing in `src/` calls `gtk_init` or
+  `gtk_init_check`, so GTK never opens its own display connection. Under
+  Wayland something else may initialise GTK as a side effect (for example the
+  libdecor GTK plugin that SDL loads for window decorations), which would hide
+  the bug. Under X11 nothing does. The "X11 vs Wayland" framing in the GitHub
+  thread may therefore be a symptom, not the cause.
+- **Next step:** confirm by reading the code and the SDL/libdecor sources, then
+  call `gtk_init_check` before the first dialog and fall back to something
+  that cannot crash (a clear error, a `zenity`/`kdialog` call, or SDL3's
+  `SDL_ShowOpenFileDialog`). Testing needs an X11 Linux machine; there is
+  currently none (see the Linux build note in the project memory).
+
 ## Resolved
 
 ### KI-1: Texture pop-in and flicker while streaming
