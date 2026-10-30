@@ -653,23 +653,30 @@ struct RendererState {
   // consume at t2 (replacing the classic full-res composite draw);
   // ApplyHdrPost restores it to RENDER_TARGET and clears the flag.
   bool ao_plane_in_psr = false;
-  // Occlusion-attribution grid (perf-items profiling only): a small
-  // conservative tile-MAX reduce of ao_lin_depth (ssao.hlsl ps_depth_max),
-  // read back through a two-deep never-waited ring (the photo-grab pattern)
-  // and consumed on the render thread 1-2 frames later to classify scene
-  // items as fully occluded by already-rendered geometry. Each slot stores
-  // the view_proj its depth was rendered with; the CPU test projects with
-  // THAT matrix so grid and bounds stay consistent under camera motion.
+  // Occlusion grid (the occlusion cull and the perf-items attribution): a
+  // small conservative tile-MAX reduce of ao_lin_depth (ssao.hlsl
+  // ps_depth_max), read back through a two-deep never-waited ring (the
+  // photo-grab pattern) and consumed on the render thread 1-2 frames later
+  // to classify scene items as fully occluded by already-rendered geometry.
+  // Each slot stores the view_proj its depth was rendered with; the CPU test
+  // projects with THAT matrix so grid and bounds stay consistent under
+  // camera motion. Built once per frame: inside ApplySsaoPass when AO runs,
+  // else by ApplyOcclusionGridPass (own linearize into ao_lin_depth).
   static constexpr uint32_t kOcclGridW = 160;
   static constexpr uint32_t kOcclGridH = 90;
   static constexpr uint32_t kOcclRowPitch = 768;  // 160*4 aligned to 256
   nrhi::Pipeline* pso_occl_reduce = nullptr;
+  // Standalone-path linearize (ssao.hlsl ps_linearize, AO_MSAA variant per
+  // occl_lin_msaa), so the grid never needs the full SSAO pipeline.
+  nrhi::Pipeline* pso_occl_linearize = nullptr;
+  uint32_t occl_lin_msaa = 0;
   nrhi::Texture* occl_tex = nullptr;  // R32F grid, idles in RENDER_TARGET
   nrhi::Buffer* occl_readback[2] = {};
   uint8_t* occl_readback_ptr[2] = {};
   uint64_t occl_submission[2] = {};
   float occl_vp[2][16] = {};
   float occl_cam[2][3] = {};  // camera position the grid's frame rendered from
+  bool occl_src_ssao[2] = {};  // slot built by the SSAO pass (else standalone)
   bool occl_pending[2] = {};
   int occl_write_index = 0;
   bool occl_failed = false;
@@ -679,6 +686,7 @@ struct RendererState {
   float occl_grid_cam[3] = {};
   uint64_t occl_grid_frame = 0;  // frame_number the grid was captured on
   bool occl_grid_valid = false;
+  bool occl_grid_src_ssao = false;
   // HDR pipeline (hdr.hlsl): the scene renders pre-tonemap linear into a
   // float intermediate (the MSAA color target and/or hdr_resolved), a bloom
   // pyramid extracts real HDR energy, and ps_tonemap applies the game's
@@ -992,8 +1000,14 @@ struct RendererState {
   // Last successfully resolved words-key per streamed-art site
   // (mesh << 1 | slot; slot 0 = diffuse override, 1 = decal override).
   // Serves the site's previous art while a new-mip-words decode is in
-  // flight (see resolve_fetch_words). Render thread only.
-  std::unordered_map<uint64_t, uint64_t> words_sticky;
+  // flight (see resolve_fetch_words). Render thread only. The routing maps
+  // here (words_sticky, tex_routes, tex_sticky, tex_pending_first) are
+  // stamped on every use and aged out by PruneTexRouting.
+  struct WordsStickySite {
+    uint64_t words_key = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<uint64_t, WordsStickySite> words_sticky;
   // (The fam 5/6 masks+normal t4/t5 descriptor-pair cache is gone: draws
   // bind both views directly via cmd->SetTexturePair(5, spec, normal);
   // pair descriptors are cached inside the backend, so texture replacement
@@ -1022,6 +1036,7 @@ struct RendererState {
     // and payload polls are suspended while held (the probes would read
     // the reused pool). A re-promote publishes fresh words and re-routes.
     bool demoted = false;
+    uint64_t last_used_frame = 0;
   };
   std::unordered_map<uint32_t, TexRoute> tex_routes;
   // Sticky texture serving (see resolve_texture in draw_item): the last
@@ -1044,12 +1059,17 @@ struct RendererState {
     // serve the previous occupant's art (skin on the hair, a composite mask
     // layer on the arms).
     uint64_t piece = 0;
+    uint64_t last_used_frame = 0;
   };
   std::unordered_map<uint64_t, TexStickySite> tex_sticky;
   // First frame a texture object resolved white-with-heal-in-flight:
   // brand-new items (no sticky fallback) skip drawing for a short window
   // instead of flashing white.
-  std::unordered_map<uint32_t, uint64_t> tex_pending_first;
+  struct PendingFirst {
+    uint64_t first_frame = 0;
+    uint64_t last_used_frame = 0;
+  };
+  std::unordered_map<uint32_t, PendingFirst> tex_pending_first;
   bool failed = false;
   bool announced = false;
 };
@@ -1100,15 +1120,25 @@ bool EnsureHdrPipeline(const NativeGuestOutputRenderContext& context);
 bool ApplySsaoPass(const NativeGuestOutputRenderContext& context,
                    nrhi::Cmd* cmd, const FrameScene& scene,
                    const nrhi::Viewport& viewport, const nrhi::Rect& scissor);
+// Occlusion grid without SSAO (KI-21): linearizes the scene depth into
+// ao_lin_depth and records the same grid reduce + readback ApplySsaoPass
+// does. Call only on frames where ApplySsaoPass did not run, so the grid is
+// built at most once per frame. Returns true when it recorded (binding
+// layout changed; ao_lin_depth then holds this frame's linear depth, like
+// after the SSAO pass).
+bool ApplyOcclusionGridPass(const NativeGuestOutputRenderContext& context,
+                            nrhi::Cmd* cmd, const FrameScene& scene,
+                            const nrhi::Viewport& viewport,
+                            const nrhi::Rect& scissor);
 bool ApplySsrPass(const NativeGuestOutputRenderContext& context,
                   nrhi::Cmd* cmd, const FrameScene& scene,
                   const nrhi::Viewport& viewport, const nrhi::Rect& scissor,
-                  bool ssao_ran);
+                  bool lin_depth_ready);
 bool EnsureVolumetricPipeline(const NativeGuestOutputRenderContext& context);
 bool ApplyVolumetricPass(const NativeGuestOutputRenderContext& context,
                          nrhi::Cmd* cmd, const FrameScene& scene,
                          const nrhi::Viewport& viewport,
-                         const nrhi::Rect& scissor, bool ssao_ran,
+                         const nrhi::Rect& scissor, bool lin_depth_ready,
                          uint64_t frame_number);
 void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
                   nrhi::Cmd* cmd, const nrhi::Viewport& viewport,
