@@ -839,6 +839,9 @@ void Skate3BaseApp::OnPostSetup() {
     });
   });
   skate3::options_menu::SetRestartCallback([this]() { RestartGame(); });
+  // Quit Game: the overlay's Close Game exit (CloseGame defers to the UI
+  // thread, so it runs after the settings save queued just before it).
+  skate3::options_menu::SetQuitCallback([this]() { CloseGame(); });
   skate3::options_menu::Install();
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
@@ -945,26 +948,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     ApplyGameplayCursorMode();
     skate3::ResumeMaxQuality();
   };
-  auto close_game = [this]() {
-#if REX_PLATFORM_MAC || REX_PLATFORM_LINUX
-    std::thread([]() {
-      std::this_thread::sleep_for(std::chrono::seconds(10));
-      REXLOG_WARN("Close Game watchdog exiting process after shutdown timeout");
-      std::_Exit(EXIT_SUCCESS);
-    }).detach();
-#endif
-    app_context().CallInUIThreadDeferred([this]() {
-#if REX_PLATFORM_MAC
-      app_context().QuitFromUIThread();
-#else
-      if (window()) {
-        window()->RequestClose();
-      } else {
-        app_context().QuitFromUIThread();
-      }
-#endif
-    });
-  };
+  auto close_game = [this]() { CloseGame(); };
   auto restart_game = [this]() { RestartGame(); };
   // Raw pad poll for menu navigation: bypasses the is_active gate that
   // zeroes guest-facing input while the settings screen is open.
@@ -1020,6 +1004,27 @@ void Skate3BaseApp::ApplyGameplayCursorMode() {
   if (window()) {
     window()->SetCursorVisibility(rex::ui::Window::CursorVisibility::kAutoHidden);
   }
+}
+
+void Skate3BaseApp::CloseGame() {
+#if REX_PLATFORM_MAC || REX_PLATFORM_LINUX
+  std::thread([]() {
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    REXLOG_WARN("Close Game watchdog exiting process after shutdown timeout");
+    std::_Exit(EXIT_SUCCESS);
+  }).detach();
+#endif
+  app_context().CallInUIThreadDeferred([this]() {
+#if REX_PLATFORM_MAC
+    app_context().QuitFromUIThread();
+#else
+    if (window()) {
+      window()->RequestClose();
+    } else {
+      app_context().QuitFromUIThread();
+    }
+#endif
+  });
 }
 
 void Skate3BaseApp::RestartGame() {
