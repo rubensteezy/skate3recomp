@@ -1199,11 +1199,11 @@ repro steps; the entry says where the problem is and how it would show.
 
 ### KI-102: Linux crashes at the ISO picker on X11 (GTK never initialised)
 
-- **Status:** fix in review in rubensteezy/skate3recomp#PRNUM, not yet run on
+- **Status:** fix in review in rubensteezy/skate3recomp#55, not yet run on
   Linux
 - **Area:** Linux, installer file picker
 - **Tracking:** GitHub issue rubensteezy/skate3recomp#53 (reported by
-  cproo12); PR #PRNUM.
+  cproo12); PR #55.
 - **Symptom:** on Linux Mint 22.3 with an X11 session (Intel UHD 630), the
   v2.1.0 release crashes when it opens the "Select ISO" dialog: GTK prints
   `Gtk-ERROR: Can't create a GtkStyleContext without a display connection`
@@ -1236,7 +1236,7 @@ repro steps; the entry says where the problem is and how it would show.
   skips the dialog. Windows and macOS code is unchanged.
 - **Not tested:** nothing ran on Linux. The Windows build compiles and the Linux
   file was syntax-checked against mock GTK and POSIX headers only. A tester on
-  an X11 session needs to confirm the dialog opens (see PR #PRNUM for steps).
+  an X11 session needs to confirm the dialog opens (see PR #55 for steps).
 - **Possible follow-up:** replace GTK with SDL3's `SDL_ShowOpenFileDialog`
   (SDL_DIALOG is already on in the SDK). It would drop the libgtk-3 runtime
   dependency, but it is asynchronous and portal-based, so the synchronous picker
